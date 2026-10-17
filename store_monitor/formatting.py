@@ -56,11 +56,11 @@ def track_label(event):
     return "Track" if event["store"] == "google" and not event["kind"].startswith("build_") else "Platform"
 
 
-def steps_title(event, destination):
-    """The steps this destination may see, joined; events queued before batching have one step."""
+def step_titles(event, destination):
+    """Titles of the steps this destination may see, oldest first; events queued before batching have one."""
     steps = event.get("steps") or [{"kind": event["kind"], "title": event["title"]}]
     visible = event.get("visible", {}).get(destination)
-    return " → ".join(step["title"] for step in steps if visible is None or step["kind"] in visible)
+    return [step["title"] for step in steps if visible is None or step["kind"] in visible]
 
 
 def notes_heading(event):
@@ -78,7 +78,9 @@ def telegram_html(event, display_timezone):
         message = f"{icon} <b>{escape(event['title'])}</b>\n{escape(event.get('detail', ''))}"
         return message if length(message) <= TELEGRAM_LIMIT else None
     icon, store, _ = STORES[event["store"]]
-    lines = [f"{icon} <b>{escape(event['app_name'])}</b> — <b>{escape(steps_title(event, 'telegram'))}</b>"]
+    titles = step_titles(event, "telegram")
+    # The latest step is the headline; the values below it are the ones that apply now.
+    lines = [f"{icon} <b>{escape(event['app_name'])}</b> — <b>{escape(titles[-1])}</b>"]
     facts = [f"Version <b>{escape(event['version'])}</b>"] if event.get("version") else []
     if event.get("build"):
         facts.append(f"Build <b>{escape(event['build'])}</b>")
@@ -91,6 +93,8 @@ def telegram_html(event, display_timezone):
     if event.get("rollout") is not None:
         place.append(f"Rollout <b>{percent(event['rollout'])}</b>")
     lines.append(" · ".join(place))
+    if len(titles) > 1:
+        lines.append(f"<i>Earlier: {escape(' → '.join(titles[:-1]))}</i>")
     footer = f"<i>Observed {escape(local_time(event['observed_at'], display_timezone))}</i>" if event.get("observed_at") else ""
 
     def build(notes):
@@ -109,9 +113,12 @@ def telegram_html(event, display_timezone):
 def discord_payload(event, display_timezone):
     """One embed coloured by store; mentions never ping anyone."""
     icon, store, colour = STORES[event["store"]]
-    title = preview(f"{event['app_name']} — {steps_title(event, 'discord')}", DISCORD_TITLE_LIMIT)
+    titles = step_titles(event, "discord")
+    title = preview(f"{event['app_name']} — {titles[-1]}", DISCORD_TITLE_LIMIT)
     embed = {"author": {"name": f"{icon} {store}"}, "color": colour,
-             "title": fit(discord_escape, title, DISCORD_TITLE_LIMIT) or steps_title(event, "discord")}
+             "title": fit(discord_escape, title, DISCORD_TITLE_LIMIT) or titles[-1]}
+    if len(titles) > 1:
+        embed["description"] = "*Earlier: " + discord_escape(" → ".join(titles[:-1])) + "*"
     fields = []
     for name, value in (("Version", event.get("version")), ("Build", event.get("build")),
                         (track_label(event), track_text(event)),

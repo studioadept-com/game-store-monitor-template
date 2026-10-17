@@ -160,8 +160,11 @@ def changes(old, new):
 
 
 def release_event(record, steps):
-    """Structured fields for one or more steps of the same release, rendered by each destination."""
-    title = " → ".join(step["title"] for step in steps)
+    """Structured fields for one or more steps of the same release, rendered by each destination.
+
+    The latest step is the headline; earlier steps are kept for a quieter line.
+    """
+    title = steps[-1]["title"]
     notes = any(step["notes"] for step in steps)
     rollout = next((step["rollout"] for step in reversed(steps) if "rollout" in step), record.get("rollout"))
     event = {"kind": steps[-1]["kind"], "kinds": [step["kind"] for step in steps], "steps": steps, "title": title,
@@ -173,7 +176,10 @@ def release_event(record, steps):
     if notes:
         event.update(notes=record.get("notes", "").strip(), notes_source=record.get("notes_source", "Release notes"),
                      notes_locale=record.get("notes_locale", ""))
-    event["text"] = describe(record, {"title": title, "notes": notes})
+    text = describe(record, {"title": title, "notes": False})
+    if len(steps) > 1:
+        text += "\nEarlier: " + " → ".join(step["title"] for step in steps[:-1])
+    event["text"] = text + notes_context(record) if notes else text
     return event
 
 

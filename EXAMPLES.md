@@ -10,20 +10,22 @@ Sent with `parse_mode: HTML`. Store-supplied text is escaped, and release notes 
 
 ### Several steps in one message
 
-Changes to the same release or build that arrive together, or within `batch_window_seconds` of an in-between state, are sent as one message:
+Changes to the same release or build that arrive together, or within `batch_window_seconds` of an in-between state, are sent as one message. The latest step leads, the values below it are the ones that apply now, and earlier steps move to a quieter *Earlier* line:
 
-> 🤖 **Sample Runner** — **Moved to production → Rollout at 20%**\
+> 🤖 **Sample Runner** — **Rollout at 20%**\
 > Version **1.0.21** · Build **210**\
-> Google Play · Track **production** · Rollout **20%**
+> Google Play · Track **production** · Rollout **20%**\
+> *Earlier: Moved to production*
 >
 > **Google Play release notes (en-US)**
 > > New maps
 >
 > *Observed 2026-09-08 17:30 UTC*
 
-> 🍎 **Sample Miner** — **Build uploaded — processing → Build completed processing**\
+> 🍎 **Sample Miner** — **Build completed processing**\
 > Version **1.0.2** · Build **42**\
-> App Store · **iOS**
+> App Store · **iOS**\
+> *Earlier: Build uploaded — processing*
 >
 > **TestFlight What to Test (en-US)**
 > > Added fishing boats
@@ -126,7 +128,7 @@ One embed per event, with a blue bar for the App Store and a green bar for Googl
 
 Games listed in `config.json` → `discord.exclude_apps` never appear. Change `discord.events` to send more; see the README.
 
-A combined message shows only the steps Discord's filter allows, so the first example above appears there as **Sample Runner — Moved to production**.
+A combined message shows only the steps Discord's filter allows, so the first example above appears there as a single-step message, **Sample Runner — Moved to production**.
 
 ### Version entered review
 

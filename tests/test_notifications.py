@@ -82,9 +82,13 @@ class BatchingTest(unittest.TestCase):
         event, = queued(google(status="in review", phase=None, rollout=None), google())
         self.assertEqual(event["kinds"], ["published", "rollout_started"])
         self.assertEqual(event["pending"], ["telegram", "discord"])
-        self.assertIn("— <b>Moved to production → Rollout at 20%</b>", telegram_html(event, TZ))
-        # The milestone channel shows only the steps its filter allows.
-        self.assertTrue(discord_payload(event, TZ)["embeds"][0]["title"].endswith("— Moved to production"))
+        message = telegram_html(event, TZ)
+        self.assertIn("— <b>Rollout at 20%</b>\n", message)  # The latest step leads.
+        self.assertIn("Rollout <b>20%</b>\n<i>Earlier: Moved to production</i>", message)
+        # The milestone channel shows only the steps its filter allows, so no "Earlier" line either.
+        embed = discord_payload(event, TZ)["embeds"][0]
+        self.assertTrue(embed["title"].endswith("— Moved to production"))
+        self.assertNotIn("description", embed)
         # Events queued before batching have no steps and still render.
         old = {"kind": "published", "title": "Moved to production", "store": "google", "app_name": "Game"}
         self.assertIn("— <b>Moved to production</b>", telegram_html(old, TZ))
@@ -99,7 +103,8 @@ class BatchingTest(unittest.TestCase):
         sender.send.assert_not_called()  # Still inside the batch window.
         state = self.run_change(state, build, {**build, "status": "VALID"}, WHEN + timedelta(minutes=5), 600)
         event, = state["outbox"]
-        self.assertEqual(event["title"], "Build uploaded — processing → Build completed processing")
+        self.assertEqual(event["title"], "Build completed processing")
+        self.assertIn("— Build completed processing\nApp Store · IOS\nEarlier: Build uploaded — processing", event["text"])
         self.assertNotIn("hold_until", event)  # A settled state goes out at once.
         self.assertEqual([entry["kinds"] for entry in state["history"]], [["build_processing"], ["build_processed"]])
 
