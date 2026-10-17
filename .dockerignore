@@ -1,0 +1,5 @@
+*
+!requirements.txt
+!config.json
+!store_monitor/
+store_monitor/__pycache__/

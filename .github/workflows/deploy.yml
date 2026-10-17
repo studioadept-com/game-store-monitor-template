@@ -1,0 +1,87 @@
+name: Deploy monitor
+
+# Builds the monitor image and updates the Cloud Run job that Cloud Scheduler
+# starts every five minutes. Every value comes from repository variables set by
+# scripts/setup-gcp.sh; see AGENTS.md.
+"on":
+  push:
+    branches: [main]
+    paths:
+      - store_monitor/**
+      - config.json
+      - requirements.txt
+      - Dockerfile
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-store-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT: ${{ vars.GCP_PROJECT }}
+  REGION: ${{ vars.GCP_REGION }}
+  IMAGE: ${{ vars.IMAGE }}
+  STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+  MONITOR_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check repository variables
+        run: |
+          for name in PROJECT REGION IMAGE STATE_BUCKET MONITOR_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              echo "Repository variable for $name is not set; run scripts/setup-gcp.sh variables" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Test
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+      - name: Build and push image
+        run: |
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE:$GITHUB_SHA" .
+          docker push "$IMAGE:$GITHUB_SHA"
+      - name: Update Cloud Run job
+        run: |
+          # Map only the secrets that exist, so Telegram, Discord and either store can be left out.
+          mapped=""
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID DISCORD_WEBHOOK_URL ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY; do
+            if output=$(gcloud secrets describe "$name" --project "$PROJECT" --format="value(name)" 2>&1); then
+              mapped="${mapped:+$mapped,}$name=$name:latest"
+            elif ! grep -q NOT_FOUND <<<"$output"; then
+              echo "Cannot check secret $name: $output" >&2  # Never deploy with secrets silently missing.
+              exit 1
+            fi
+          done
+          echo "Secrets mapped: ${mapped:-none}" | sed 's/=[A-Z_]*:latest//g'
+          if [ -n "$mapped" ]; then secrets=(--set-secrets "$mapped"); else secrets=(--clear-secrets); fi
+          # The task timeout stays below the five-minute schedule so checks never overlap.
+          gcloud run jobs deploy store-monitor \
+            --project "$PROJECT" --region "$REGION" --image "$IMAGE:$GITHUB_SHA" \
+            --service-account "$MONITOR_SERVICE_ACCOUNT" \
+            --set-env-vars "STATE_BUCKET=$STATE_BUCKET" \
+            "${secrets[@]}" \
+            --tasks 1 --parallelism 1 --max-retries 0 --task-timeout 270s \
+            --cpu 1 --memory 512Mi --quiet

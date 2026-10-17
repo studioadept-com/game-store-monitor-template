@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env*
+*.p8
+*.pem
+*credentials*.json
+gha-creds-*.json
+state.json
+.pytest_cache/
+setup.env
