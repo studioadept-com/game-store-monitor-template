@@ -13,7 +13,7 @@ It reports builds, drafts, review and approval decisions, publication, rollout c
 
 ## How it runs
 
-A small **Cloud Run service** (a quarter vCPU, billed only while a check runs) checks both stores each time **Cloud Scheduler** calls it, every five minutes. That fits in Cloud Run's free allowance; see the cost table in [AGENTS.md](AGENTS.md#cost). State (known releases, history, and queued notifications) is one `state.json` in a private Cloud Storage bucket. Pushing to `main` runs `deploy.yml`, which tests, builds and redeploys the service. GitHub signs in to Google Cloud keylessly, and Google Play access uses the service's own service account, so the only stored keys are the App Store key and the Telegram and Discord credentials, all in Secret Manager.
+A small **Cloud Run service** (a quarter vCPU, billed only while a check runs) checks both stores each time **Cloud Scheduler** calls it, every five minutes. That fits in Cloud Run's free allowance; see the cost table in [AGENTS.md](AGENTS.md#cost). State (known releases, history, and queued notifications) is one `state.json` in a private Cloud Storage bucket. Pushing to `main` runs `deploy.yml`, which tests, builds and redeploys the service. In a copy that isn't set up yet (and in this template), the deploy is skipped until the repository variables exist. GitHub signs in to Google Cloud keylessly, and Google Play access uses the service's own service account, so the only stored keys are the App Store key and the Telegram and Discord credentials, all in Secret Manager.
 
 ## Configuration (`config.json`)
 

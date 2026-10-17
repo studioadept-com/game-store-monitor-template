@@ -31,6 +31,10 @@ env:
 
 jobs:
   deploy:
+    # The template itself, and a copy before scripts/setup-gcp.sh has run, have no
+    # project to deploy to: skip instead of failing. The step below still catches a
+    # copy that is only partly configured.
+    if: ${{ vars.GCP_PROJECT != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
