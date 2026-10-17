@@ -25,6 +25,7 @@ A small **Cloud Run service** (a quarter vCPU, billed only while a check runs) c
 | `<destination>.google_tracks` | Limit Google release events to these tracks, for example `["production"]` |
 | `<destination>.exclude_apps` | Games to leave out, by iOS bundle ID, Android package name, or App Store numeric ID. A list, or an object of ID → name. |
 | `notification_timezone` | Time zone for the *Observed* time, for example `Europe/London` |
+| `batch_window_seconds` | How long a change into an in-between state (such as a build still processing) waits for its next step, so both go out as one message. Default 600; `0` sends every change at once |
 | `google.apps`, `google.extra_tracks` | Packages or tracks that discovery misses |
 | `google.lifecycle_*` | Budget for Google's separately rate-limited release-status endpoint; the defaults are safe |
 
@@ -42,6 +43,7 @@ As shipped, both destinations are off. Telegram gets everything once enabled. Di
 
 ## Behaviour worth knowing
 
+- **Batching.** All changes to one release or build found in the same check are sent as one message, such as **Moved to production → Rollout at 20%**. A change into an in-between state waits up to `batch_window_seconds` (default 600, about two checks) for the next step. These states are an App Store build still processing, ready for review, accepted, awaiting Apple's release or processing for distribution, and on Google Play, approved but not yet published, or a track configured but not yet confirmed. So **Build uploaded — processing → Build completed processing** arrives once. A settled state goes out at once together with anything held for that release; if no next step comes, the held message goes out when the window ends. `0` turns holding off. Held messages wait in the outbox in `state.json`, so a restart neither loses nor repeats them. Discord shows only the steps its filter allows.
 - **Quiet first run:** existing releases are recorded without being announced, followed by one **Monitoring connected** message per store.
 - **At-least-once delivery:** each destination acknowledges every message separately, and state is saved after each send. A failing destination keeps its queue without blocking or repeating the other one. A crash between a send and the save can repeat that one message.
 - **Failures:** a store, track or destination that fails three runs in a row raises one **Monitor needs attention** alert, and another when it recovers. A check with errors answers HTTP 500, so it shows as failed in Cloud Scheduler and the service logs.

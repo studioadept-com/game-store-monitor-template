@@ -8,6 +8,28 @@ Every notification starts with the store icon (🍎 App Store, 🤖 Google Play)
 
 Sent with `parse_mode: HTML`. Store-supplied text is escaped, and release notes appear in an expandable quote.
 
+### Several steps in one message
+
+Changes to the same release or build that arrive together, or within `batch_window_seconds` of an in-between state, are sent as one message:
+
+> 🤖 **Sample Runner** — **Moved to production → Rollout at 20%**\
+> Version **1.0.21** · Build **210**\
+> Google Play · Track **production** · Rollout **20%**
+>
+> **Google Play release notes (en-US)**
+> > New maps
+>
+> *Observed 2026-09-08 17:30 UTC*
+
+> 🍎 **Sample Miner** — **Build uploaded — processing → Build completed processing**\
+> Version **1.0.2** · Build **42**\
+> App Store · **iOS**
+>
+> **TestFlight What to Test (en-US)**
+> > Added fishing boats
+>
+> *Observed 2026-09-08 17:35 UTC*
+
 ### Version entered review
 
 > 🍎 **Sample Miner** — **Waiting for review**\
@@ -103,6 +125,8 @@ One embed per event, with a blue bar for the App Store and a green bar for Googl
 | Google Play, production track | Moved to production (confirmed by the release-status API), rollout percentage changes, rollout paused, resumed, and completed |
 
 Games listed in `config.json` → `discord.exclude_apps` never appear. Change `discord.events` to send more; see the README.
+
+A combined message shows only the steps Discord's filter allows, so the first example above appears there as **Sample Runner — Moved to production**.
 
 ### Version entered review
 

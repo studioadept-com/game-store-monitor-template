@@ -6,7 +6,9 @@ once, so a failing destination keeps its place in the queue without blocking
 or repeating the others. Delivery stays at least once per destination.
 """
 import time
+from datetime import datetime, timezone
 
+from .events import held
 from .providers import safe_error
 
 DESTINATIONS = ("telegram", "discord")
@@ -58,10 +60,12 @@ def prepare(state, active):
     return state
 
 
-def deliver(state, backend, name, sender):
+def deliver(state, backend, name, sender, now=None):
     """Send this destination's events in order; stop at its first failure and return the error."""
+    now = now or datetime.now(timezone.utc)
     for event in list(state["outbox"]):
-        if name not in event.get("pending", ["telegram"]):
+        # A held event waits for its next step until its batch window ends.
+        if name not in event.get("pending", ["telegram"]) or held(event, now):
             continue
         try:
             sender.send(event)
@@ -75,10 +79,10 @@ def deliver(state, backend, name, sender):
     return None
 
 
-def drain(state, backend, senders):
+def drain(state, backend, senders, now=None):
     """Returns {destination: error} for destinations that could not finish."""
     failures = {}
     for name, sender in senders.items():
-        if error := deliver(state, backend, name, sender):
+        if error := deliver(state, backend, name, sender, now):
             failures[name] = error
     return failures

@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -15,6 +15,8 @@ from store_monitor.http import ApiError
 from store_monitor.state import LocalState
 
 WHEN = datetime(2026, 10, 17, 12, 5, tzinfo=timezone.utc)
+TZ = "UTC"
+ROUTER = routes
 SHIPPED = json.loads((Path(__file__).parent.parent / "config.json").read_text())
 # Telegram gets everything; Discord uses the shipped milestone filter and leaves one game out.
 CONFIG = {"telegram": {"enabled": True},
@@ -66,6 +68,52 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(pending(None, apple(status="draft"), discord_only), [["discord"]])
         with self.assertRaisesRegex(RuntimeError, "No destination enabled"):
             enabled(SHIPPED)  # Neither destination is on until the owner chooses.
+
+
+class BatchingTest(unittest.TestCase):
+    def run_change(self, state, old, new, when, hold):
+        scope = f"{new['store']}/{new['app_id']}"
+        state["scopes"][scope] = {"store": new["store"], "app_id": new["app_id"], "app_name": new["app_name"],
+                                  "releases": {"r": old} if old else {}}
+        snapshot = {scope: {**state["scopes"][scope], "releases": {"r": new}}}
+        return reconcile(state, snapshot, {}, set(), observed_at=when, destinations=ROUTER(CONFIG), hold_seconds=hold)
+
+    def test_steps_seen_in_one_run_become_one_message(self):
+        event, = queued(google(status="in review", phase=None, rollout=None), google())
+        self.assertEqual(event["kinds"], ["published", "rollout_started"])
+        self.assertEqual(event["pending"], ["telegram", "discord"])
+        self.assertIn("— <b>Moved to production → Rollout at 20%</b>", telegram_html(event, TZ))
+        # The milestone channel shows only the steps its filter allows.
+        self.assertTrue(discord_payload(event, TZ)["embeds"][0]["title"].endswith("— Moved to production"))
+        # Events queued before batching have no steps and still render.
+        old = {"kind": "published", "title": "Moved to production", "store": "google", "app_name": "Game"}
+        self.assertIn("— <b>Moved to production</b>", telegram_html(old, TZ))
+
+    @patch("store_monitor.delivery.time.sleep")
+    def test_in_between_step_waits_for_the_next_one(self, _):
+        build = {**apple(), "kind": "build", "status": "PROCESSING", "notes_source": "TestFlight What to Test"}
+        state = self.run_change(empty_state() | {"initialized": ["apple"]}, None, build, WHEN, 600)
+        self.assertIn("hold_until", state["outbox"][0])
+        sender = Mock(interval=0)
+        drain(state, Mock(), {"telegram": sender}, now=WHEN + timedelta(minutes=4))
+        sender.send.assert_not_called()  # Still inside the batch window.
+        state = self.run_change(state, build, {**build, "status": "VALID"}, WHEN + timedelta(minutes=5), 600)
+        event, = state["outbox"]
+        self.assertEqual(event["title"], "Build uploaded — processing → Build completed processing")
+        self.assertNotIn("hold_until", event)  # A settled state goes out at once.
+        self.assertEqual([entry["kinds"] for entry in state["history"]], [["build_processing"], ["build_processed"]])
+
+    @patch("store_monitor.delivery.time.sleep")
+    def test_held_step_goes_out_alone_when_the_window_ends(self, _):
+        build = {**apple(), "kind": "build", "status": "PROCESSING", "notes_source": "TestFlight What to Test"}
+        state = self.run_change(empty_state() | {"initialized": ["apple"]}, None, build, WHEN, 600)
+        sender = Mock(interval=0)
+        drain(state, Mock(), {"telegram": sender}, now=WHEN + timedelta(minutes=11))
+        self.assertEqual([call.args[0]["kinds"] for call in sender.send.call_args_list], [["build_processing"]])
+        later = self.run_change(state, build, {**build, "status": "VALID"}, WHEN + timedelta(minutes=12), 600)
+        self.assertEqual([event["kinds"] for event in later["outbox"]], [["build_processed"]])
+        unheld = self.run_change(empty_state() | {"initialized": ["apple"]}, None, build, WHEN, 0)
+        self.assertNotIn("hold_until", unheld["outbox"][0])  # batch_window_seconds = 0 turns holding off.
 
 
 class DeliveryTest(unittest.TestCase):

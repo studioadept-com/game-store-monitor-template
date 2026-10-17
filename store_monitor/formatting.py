@@ -56,6 +56,13 @@ def track_label(event):
     return "Track" if event["store"] == "google" and not event["kind"].startswith("build_") else "Platform"
 
 
+def steps_title(event, destination):
+    """The steps this destination may see, joined; events queued before batching have one step."""
+    steps = event.get("steps") or [{"kind": event["kind"], "title": event["title"]}]
+    visible = event.get("visible", {}).get(destination)
+    return " → ".join(step["title"] for step in steps if visible is None or step["kind"] in visible)
+
+
 def notes_heading(event):
     locale = f" ({event['notes_locale']})" if event.get("notes_locale") else ""
     return event.get("notes_source", "Release notes") + locale
@@ -71,7 +78,7 @@ def telegram_html(event, display_timezone):
         message = f"{icon} <b>{escape(event['title'])}</b>\n{escape(event.get('detail', ''))}"
         return message if length(message) <= TELEGRAM_LIMIT else None
     icon, store, _ = STORES[event["store"]]
-    lines = [f"{icon} <b>{escape(event['app_name'])}</b> — <b>{escape(event['title'])}</b>"]
+    lines = [f"{icon} <b>{escape(event['app_name'])}</b> — <b>{escape(steps_title(event, 'telegram'))}</b>"]
     facts = [f"Version <b>{escape(event['version'])}</b>"] if event.get("version") else []
     if event.get("build"):
         facts.append(f"Build <b>{escape(event['build'])}</b>")
@@ -102,9 +109,9 @@ def telegram_html(event, display_timezone):
 def discord_payload(event, display_timezone):
     """One embed coloured by store; mentions never ping anyone."""
     icon, store, colour = STORES[event["store"]]
-    title = preview(f"{event['app_name']} — {event['title']}", DISCORD_TITLE_LIMIT)
+    title = preview(f"{event['app_name']} — {steps_title(event, 'discord')}", DISCORD_TITLE_LIMIT)
     embed = {"author": {"name": f"{icon} {store}"}, "color": colour,
-             "title": fit(discord_escape, title, DISCORD_TITLE_LIMIT) or event["title"]}
+             "title": fit(discord_escape, title, DISCORD_TITLE_LIMIT) or steps_title(event, "discord")}
     fields = []
     for name, value in (("Version", event.get("version")), ("Build", event.get("build")),
                         (track_label(event), track_text(event)),

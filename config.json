@@ -27,6 +27,7 @@
     },
     "google_tracks": ["production"]
   },
+  "batch_window_seconds": 600,
   "failure_threshold": 3,
   "notification_timezone": "UTC"
 }

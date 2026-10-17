@@ -1,5 +1,5 @@
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -64,6 +64,11 @@ STATUS_KINDS = {
     "ready to submit for review": "not_sent_for_review",
     "track configured; publication not yet confirmed": "publication_unconfirmed",
 }
+# In-between states that usually move on within minutes. Their events wait up to
+# batch_window_seconds, so the next step can arrive in the same message.
+HOLD_STATUSES = {("apple", "ready for review"), ("apple", "accepted"), ("apple", "awaiting Apple's release"),
+                 ("apple", "processing for distribution"), ("google", "approved, awaiting your release"),
+                 ("google", "track configured; publication not yet confirmed")}
 
 
 def change(kind, title, notes=False, **extra):
@@ -154,19 +159,32 @@ def changes(old, new):
     return [describe(new, found) for found in detect(old, new)]
 
 
-def release_event(record, found):
-    """Structured fields that destinations render in their own format."""
-    event = {"kind": found["kind"], "title": found["title"], "store": record["store"],
-             "app_id": record.get("app_id"), "app_name": record["app_name"]}
+def release_event(record, steps):
+    """Structured fields for one or more steps of the same release, rendered by each destination."""
+    title = " → ".join(step["title"] for step in steps)
+    notes = any(step["notes"] for step in steps)
+    rollout = next((step["rollout"] for step in reversed(steps) if "rollout" in step), record.get("rollout"))
+    event = {"kind": steps[-1]["kind"], "kinds": [step["kind"] for step in steps], "steps": steps, "title": title,
+             "store": record["store"], "app_id": record.get("app_id"), "app_name": record["app_name"]}
     optional = {"bundle_id": record.get("bundle_id"), "track": record.get("track"),
                 "version": record.get("version") if record.get("version") != "unknown" else None,
-                "build": record.get("build_number"), "rollout": found.get("rollout", record.get("rollout"))}
+                "build": record.get("build_number"), "rollout": rollout}
     event.update({key: value for key, value in optional.items() if value not in (None, "")})
-    if found["notes"]:
+    if notes:
         event.update(notes=record.get("notes", "").strip(), notes_source=record.get("notes_source", "Release notes"),
                      notes_locale=record.get("notes_locale", ""))
-    event["text"] = describe(record, found)
+    event["text"] = describe(record, {"title": title, "notes": notes})
     return event
+
+
+def transitional(record):
+    if record.get("kind") == "build":
+        return record["store"] == "apple" and record["status"] == "PROCESSING"
+    return (record["store"], record["status"]) in HOLD_STATUSES
+
+
+def held(event, now):
+    return "hold_until" in event and datetime.fromisoformat(event["hold_until"]) > now
 
 
 def monitor_event(kind, title, detail):
@@ -178,7 +196,20 @@ def empty_state():
             "builds_initialized": [], "history": []}
 
 
-def enqueue(state, event, record=None, observed_at=None, display_timezone="UTC", destinations=None):
+def route(event, destinations):
+    """Destinations that want at least one step, and the steps those that want only some may show."""
+    steps = event.get("steps") or [{"kind": event["kind"]}]
+    pending, visible = [], {}
+    for name, wants in (destinations or {"telegram": lambda _: True}).items():
+        allowed = [step["kind"] for step in steps if wants({**event, "kind": step["kind"]})]
+        if allowed:
+            pending.append(name)
+            if len(allowed) < len(steps):
+                visible[name] = allowed  # A milestone channel never sees the draft or build step folded into it.
+    return pending, visible
+
+
+def enqueue(state, event, record=None, observed_at=None, display_timezone="UTC", destinations=None, history=True):
     """Queue one event for every destination that wants it; release events also go to history."""
     state["sequence"] += 1
     event = {"id": state["sequence"], **event}
@@ -186,15 +217,31 @@ def enqueue(state, event, record=None, observed_at=None, display_timezone="UTC",
         when = observed_at or datetime.now(timezone.utc)
         event["observed_at"] = when.isoformat()
         event["text"] += "\nObserved: " + local_time(event["observed_at"], display_timezone)
-        state.setdefault("history", []).append({**copy.deepcopy(event), "record": copy.deepcopy(record)})
+        if history:
+            state.setdefault("history", []).append({**copy.deepcopy(event), "record": copy.deepcopy(record)})
     # Each destination acknowledges separately, so one failing never blocks or repeats another.
-    pending = [name for name, wants in (destinations or {"telegram": lambda _: True}).items() if wants(event)]
+    pending, visible = route(event, destinations)
     if pending:
-        state["outbox"].append({**event, "pending": pending})
+        state["outbox"].append({**event, "pending": pending, **({"visible": visible} if visible else {})})
+
+
+def queue_release(state, release_id, record, steps, observed_at, display_timezone, destinations, hold_seconds):
+    """One event per release per run, folded into an event still held for the same release."""
+    previous = next((event for event in state["outbox"] if event.get("release") == release_id and held(event, observed_at)), None)
+    if previous:
+        state["outbox"].remove(previous)  # No destination has it yet, so it is rebuilt with the new steps.
+    event = {**release_event(record, (previous["steps"] if previous else []) + steps), "release": release_id}
+    if hold_seconds and transitional(record):
+        event["hold_until"] = (observed_at + timedelta(seconds=hold_seconds)).isoformat()
+    enqueue(state, event, record, observed_at, display_timezone, destinations, history=False)
+    # History records what this run observed, not the combined message.
+    entry = {**release_event(record, steps), "id": state["sequence"], "observed_at": observed_at.isoformat()}
+    entry["text"] += "\nObserved: " + local_time(entry["observed_at"], display_timezone)
+    state.setdefault("history", []).append({**entry, "record": copy.deepcopy(record)})
 
 
 def reconcile(state, snapshots, errors, successes, threshold=3, observed_at=None, display_timezone="UTC",
-              destinations=None):
+              destinations=None, hold_seconds=0):
     """Preserve failed scopes, establish quiet baselines, queue changes durably."""
     observed_at = observed_at or datetime.now(timezone.utc)
     result = copy.deepcopy(state)
@@ -223,8 +270,10 @@ def reconcile(state, snapshots, errors, successes, threshold=3, observed_at=None
             component_ready = store in builds_initialized if build_snapshot else store in initialized
             if (component_ready and not recovering_without_baseline and not first_fallback_observation
                     and not state["scopes"].get(scope, {}).get("baseline_pending")):
-                for found in detect(old.get(key), release):
-                    enqueue(result, release_event(release, found), release, observed_at, display_timezone, destinations)
+                if steps := detect(old.get(key), release):
+                    # Several steps seen in one run become one message.
+                    queue_release(result, f"{scope}/{key}", release, steps, observed_at, display_timezone,
+                                  destinations, hold_seconds)
             records[key] = release
         # Keep absent releases in history. API omission is not proof of deletion.
         result["scopes"][scope] = {**snapshot, "releases": records}

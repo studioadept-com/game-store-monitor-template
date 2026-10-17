@@ -95,14 +95,16 @@ def main(argv=None):
             errors.update(store_errors)
             successes |= store_successes
     new_state = reconcile(state, snapshots, errors, successes, config.get("failure_threshold", 3),
-                          display_timezone=display_timezone, destinations=routes(config))
+                          display_timezone=display_timezone, hold_seconds=config.get("batch_window_seconds", 600),
+                          destinations=routes(config))
     summary = f"Checked {len(snapshots)} app/track scopes; {len(errors)} errors; {len(new_state['outbox'])} queued notifications."
     print(summary)
     for scope, error in errors.items():
         print(f"Check failed: {scope}: {error}")
     if args.dry_run:
         for event in new_state["outbox"]:
-            print(f"[{', '.join(event['pending'])}] {event['text']}")
+            hold = f" (held until {event['hold_until']})" if "hold_until" in event else ""
+            print(f"[{', '.join(event['pending'])}]{hold} {event['text']}")
     else:
         if new_state != state:
             backend.save(new_state)  # Persist new observations AND events before sending.
