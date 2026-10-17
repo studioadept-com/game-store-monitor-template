@@ -13,7 +13,7 @@ It reports builds, drafts, review and approval decisions, publication, rollout c
 
 ## How it runs
 
-A **Cloud Run job** checks both stores once and exits; **Cloud Scheduler** starts it every five minutes. State (known releases, history, and queued notifications) is one `state.json` in a private Cloud Storage bucket. Pushing to `main` runs `deploy.yml`, which tests, builds and redeploys the job. GitHub signs in to Google Cloud keylessly, and Google Play access uses the job's own service account, so the only stored keys are the App Store key and the Telegram and Discord credentials, all in Secret Manager.
+A small **Cloud Run service** (a quarter vCPU, billed only while a check runs) checks both stores each time **Cloud Scheduler** calls it, every five minutes. That fits in Cloud Run's free allowance; see the cost table in [AGENTS.md](AGENTS.md#cost). State (known releases, history, and queued notifications) is one `state.json` in a private Cloud Storage bucket. Pushing to `main` runs `deploy.yml`, which tests, builds and redeploys the service. GitHub signs in to Google Cloud keylessly, and Google Play access uses the service's own service account, so the only stored keys are the App Store key and the Telegram and Discord credentials, all in Secret Manager.
 
 ## Configuration (`config.json`)
 
@@ -44,7 +44,7 @@ As shipped, both destinations are off. Telegram gets everything once enabled. Di
 
 - **Quiet first run:** existing releases are recorded without being announced, followed by one **Monitoring connected** message per store.
 - **At-least-once delivery:** each destination acknowledges every message separately, and state is saved after each send. A failing destination keeps its queue without blocking or repeating the other one. A crash between a send and the save can repeat that one message.
-- **Failures:** a store, track or destination that fails three runs in a row raises one **Monitor needs attention** alert, and another when it recovers. Executions with errors show as failed in Cloud Run.
+- **Failures:** a store, track or destination that fails three runs in a row raises one **Monitor needs attention** alert, and another when it recovers. A check with errors answers HTTP 500, so it shows as failed in Cloud Scheduler and the service logs.
 - **Google Play honesty:** a release is only called live after Google's release-status endpoint confirms it. That endpoint has its own small quota, so the monitor spends a budget of six requests per run on tracks still awaiting a decision, and backs off for an hour if Google refuses.
 - **Apple phased releases** follow Apple's 1, 2, 5, 10, 20, 50, 100% schedule. These percentages are eligible automatic updates, not installs.
 - **Limits:** about 35 App Store requests and 95 Google requests per run, far below both stores' limits. Telegram and Discord get at most one message per second.
@@ -61,4 +61,4 @@ With store credentials in the environment, `.venv/bin/python -m store_monitor --
 
 ## References
 
-[Play release lifecycle](https://developers.google.com/android-publisher/api-ref/rest/v3/applications.tracks.releases) · [Play edits](https://developers.google.com/android-publisher/edits) · [App Store Connect API](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api) · [Telegram Bot API](https://core.telegram.org/bots/api) · [Discord webhooks](https://discord.com/developers/docs/resources/webhook#execute-webhook) · [Cloud Run jobs on a schedule](https://cloud.google.com/run/docs/execute/jobs-on-schedule) · [Keyless GitHub sign-in](https://github.com/google-github-actions/auth)
+[Play release lifecycle](https://developers.google.com/android-publisher/api-ref/rest/v3/applications.tracks.releases) · [Play edits](https://developers.google.com/android-publisher/edits) · [App Store Connect API](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api) · [Telegram Bot API](https://core.telegram.org/bots/api) · [Discord webhooks](https://discord.com/developers/docs/resources/webhook#execute-webhook) · [Cloud Run services on a schedule](https://cloud.google.com/run/docs/triggering/using-scheduler) · [Keyless GitHub sign-in](https://github.com/google-github-actions/auth)

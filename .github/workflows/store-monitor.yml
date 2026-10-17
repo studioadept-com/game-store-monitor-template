@@ -1,7 +1,7 @@
 name: Monitor game releases
 run-name: Manual game store check
 
-# Scheduled checks run in Google Cloud: Cloud Scheduler starts the Cloud Run job
+# Scheduled checks run in Google Cloud: Cloud Scheduler calls the Cloud Run service
 # every five minutes (see README.md). This workflow is for manual checks and
 # diagnostics; it shares the same state in Cloud Storage.
 "on":

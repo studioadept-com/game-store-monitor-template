@@ -86,14 +86,10 @@ scripts/setup-gcp.sh secret TELEGRAM_CHAT_ID
    - Set `enabled: true` on each chosen destination and `enabled: false` on any unused store.
    - Adjust `events`, `google_tracks` and `exclude_apps`, and set `notification_timezone`.
    - If Discord is the only destination, consider adding `"monitor": ["*"]` to its `events`, so health alerts reach someone.
-2. Commit and push to `main`. `deploy.yml` tests, builds and deploys the Cloud Run job, mapping only the secrets that exist. Watch it with `gh run watch --repo YOUR_GITHUB_OWNER/YOUR_REPO`. A secret added later needs another deploy: `gh workflow run deploy.yml --repo YOUR_GITHUB_OWNER/YOUR_REPO`.
-3. Send connection tests. They send one message and change nothing:
-   ```sh
-   gcloud run jobs execute store-monitor --project YOUR_GCP_PROJECT --region YOUR_REGION --args=--test-discord --wait
-   gcloud run jobs execute store-monitor --project YOUR_GCP_PROJECT --region YOUR_REGION --args=--test-telegram --wait
-   ```
-4. Run the first check, which records a quiet baseline: `gcloud run jobs execute store-monitor --project YOUR_GCP_PROJECT --region YOUR_REGION --wait`. Check its logs for errors (`scripts/setup-gcp.sh commands` prints the log command). A Play `403` usually means the Play Console invite is missing or hasn't propagated yet; it can take up to a day.
-5. Start the five-minute schedule: `scripts/setup-gcp.sh schedule`.
+2. Commit and push to `main`. `deploy.yml` tests, builds and deploys the Cloud Run service `store-monitor`, mapping only the secrets that exist. Watch it with `gh run watch --repo YOUR_GITHUB_OWNER/YOUR_REPO`. A secret added later needs another deploy: `gh workflow run deploy.yml --repo YOUR_GITHUB_OWNER/YOUR_REPO`.
+3. Run `scripts/setup-gcp.sh commands`. It prints ready-to-run `curl` calls to the service, signed with your own Google identity (the service rejects unsigned calls). Send the connection tests first (`mode=test-discord`, `mode=test-telegram`). They send one message and change nothing.
+4. Run the first real check (the `curl` without a mode), which records a quiet baseline, then check its logs for errors. A Play `403` usually means the Play Console invite is missing or hasn't propagated yet; it can take up to a day.
+5. Start the five-minute schedule with `scripts/setup-gcp.sh schedule`. It also prints the estimated monthly cost.
 6. Give the owner the output of `scripts/setup-gcp.sh commands`: run now, tests, dry run, logs, pause and resume.
 
 ## First run: the quiet baseline
@@ -113,16 +109,16 @@ The first successful check of each store records every current release **without
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | variable | GitHub | always |
 | `GCP_SERVICE_ACCOUNT`, `GCP_DEPLOYER_SERVICE_ACCOUNT` | variable | GitHub | always |
 
-`scripts/setup-gcp.sh` sets all of them. The scheduled job reads secrets from Secret Manager; the GitHub copies are only for manual workflow runs. Google Play needs no key: the job runs as the monitor service account.
+`scripts/setup-gcp.sh` sets all of them. The service reads secrets from Secret Manager; the GitHub copies are only for manual workflow runs. Google Play needs no key: the service runs as the monitor service account.
 
 ## Cost
 
-Each run takes about 70 seconds on 1 vCPU and 512 MiB, most of it waiting on store APIs; a Cloud Run job can't use less than 1 vCPU. Cloud Run jobs cost $0.000018 per vCPU-second and $0.000002 per GiB-second in tier-1 regions, after a monthly free allowance per billing account:
+The monitor runs as a Cloud Run **service** with a quarter vCPU and 256 MiB. It is billed only while a check is running, about 70–90 seconds, most of it waiting on store APIs. In tier-1 regions such as `us-central1` or `europe-west4`, request-billed Cloud Run costs $0.000024 per vCPU-second and $0.0000025 per GiB-second, after a monthly free allowance per billing account of 180,000 vCPU-seconds, 360,000 GiB-seconds and 2 million requests:
 
-| Schedule | Runs a month | Approximate cost |
+| Schedule | Checks a month | Approximate cost |
 | --- | --- | --- |
-| every 5 minutes (default) | 8,640 | about $8 a month, or about $11 if other projects on the billing account already use the free allowance |
-| every 10 minutes | 4,320 | about $2 a month |
-| every 15 minutes | 2,880 | under $1 a month |
+| every 10 minutes | 4,320 | $0 |
+| every 5 minutes (default) | 8,640 | $0 to about $0.35 a month |
+| every 2 minutes | 21,600 | about $7 a month |
 
-Change it with `SCHEDULE='*/10 * * * *' scripts/setup-gcp.sh schedule`. Secret Manager, Storage, Scheduler and the image registry (5 newest images kept) add a few cents. GitHub Actions minutes are used only for deploys and manual runs.
+`scripts/setup-gcp.sh schedule` prints the estimate for your `SCHEDULE` (for example `SCHEDULE='*/10 * * * *'`). If other projects on the same billing account already use the free allowance, five-minute checks cost about $5 a month. Secret Manager, Storage, Scheduler and the image registry (5 newest images kept) add a few cents. GitHub Actions minutes are used only for deploys and manual runs.

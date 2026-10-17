@@ -1,7 +1,7 @@
 name: Deploy monitor
 
-# Builds the monitor image and updates the Cloud Run job that Cloud Scheduler
-# starts every five minutes. Every value comes from repository variables set by
+# Builds the monitor image and updates the Cloud Run service that Cloud Scheduler
+# calls every five minutes. Every value comes from repository variables set by
 # scripts/setup-gcp.sh; see AGENTS.md.
 "on":
   push:
@@ -63,7 +63,7 @@ jobs:
           gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
           docker build -t "$IMAGE:$GITHUB_SHA" .
           docker push "$IMAGE:$GITHUB_SHA"
-      - name: Update Cloud Run job
+      - name: Update Cloud Run service
         run: |
           # Map only the secrets that exist, so Telegram, Discord and either store can be left out.
           mapped=""
@@ -77,11 +77,14 @@ jobs:
           done
           echo "Secrets mapped: ${mapped:-none}" | sed 's/=[A-Z_]*:latest//g'
           if [ -n "$mapped" ]; then secrets=(--set-secrets "$mapped"); else secrets=(--clear-secrets); fi
-          # The task timeout stays below the five-minute schedule so checks never overlap.
-          gcloud run jobs deploy store-monitor \
+          # A quarter vCPU, billed only while a check runs (CPU throttling on), keeps a
+          # five-minute schedule inside the free allowance. One instance handling one
+          # request, with a timeout below the schedule, means checks never overlap.
+          gcloud run deploy store-monitor \
             --project "$PROJECT" --region "$REGION" --image "$IMAGE:$GITHUB_SHA" \
             --service-account "$MONITOR_SERVICE_ACCOUNT" \
             --set-env-vars "STATE_BUCKET=$STATE_BUCKET" \
             "${secrets[@]}" \
-            --tasks 1 --parallelism 1 --max-retries 0 --task-timeout 270s \
-            --cpu 1 --memory 512Mi --quiet
+            --cpu 0.25 --memory 256Mi --cpu-throttling --no-cpu-boost \
+            --concurrency 1 --min-instances 0 --max-instances 1 --timeout 270 \
+            --no-allow-unauthenticated --quiet

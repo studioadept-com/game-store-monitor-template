@@ -35,14 +35,14 @@ def senders(config, display_timezone, errors):
     return result
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--local-state", help="Use this state file instead of GitHub")
     parser.add_argument("--dry-run", action="store_true", help="Read stores; do not save state or send messages")
     parser.add_argument("--test-telegram", action="store_true")
     parser.add_argument("--test-discord", action="store_true", help="Send a connection test to DISCORD_WEBHOOK_URL only")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.test_telegram:
         Telegram().post("Game store monitor: Telegram connection verified. Store monitoring will start after account setup is complete.")
         print("Telegram test delivered.")

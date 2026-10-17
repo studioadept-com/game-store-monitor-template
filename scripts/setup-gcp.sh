@@ -7,14 +7,14 @@
 #   GCP_REGION    Region for Cloud Run, Scheduler, Storage and images    (required)
 #   GITHUB_REPO   owner/name of your copy of this repository             (required)
 #   STATE_BUCKET  Bucket for state.json      (default: GCP_PROJECT-store-monitor)
-#   SCHEDULE      Cron schedule in UTC       (default: */5 * * * *)
+#   SCHEDULE      Cron schedule in UTC       (default: */5 * * * *; 'schedule' prints its cost)
 #
 # Commands:
 #   check                 Show tool, sign-in and billing status
 #   infra                 APIs, service accounts, bucket, image registry, IAM, keyless GitHub sign-in
 #   variables             GitHub repository variables the workflows read
 #   secret NAME [FILE]    Store a secret in Secret Manager and GitHub; prompts unless FILE is given
-#   schedule              After the first deploy: start the job every five minutes
+#   schedule              After the first deploy: call the service on SCHEDULE, and estimate the cost
 #   commands              Print run, test, dry-run, log and pause/resume commands
 set -euo pipefail
 
@@ -27,7 +27,7 @@ if [ -f setup.env ]; then
 fi
 
 SECRETS="TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID DISCORD_WEBHOOK_URL ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY"
-JOB=store-monitor
+SERVICE=store-monitor
 SCHEDULER_JOB=store-monitor-every-5-min
 POOL=game-store-monitor
 PROVIDER=github
@@ -195,46 +195,67 @@ cmd_secret() {
   echo "Stored. The scheduled job picks up a new value on its next run; a newly created secret needs a deploy."
 }
 
+service_url() {
+  gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format 'value(status.url)' 2>/dev/null
+}
+
+estimate() {
+  # Runs take about 90 seconds at a quarter vCPU; Cloud Run's free allowance is
+  # 180,000 vCPU-seconds a month per billing account, then $0.000024 each.
+  case "$SCHEDULE" in
+    "*/"[0-9]*" * * * *") minutes=${SCHEDULE#*/}; minutes=${minutes%% *} ;;
+    *) echo "Cost estimate skipped: SCHEDULE is not of the form '*/N * * * *'"; return ;;
+  esac
+  awk -v runs="$((43200 / minutes))" 'BEGIN {
+    seconds = runs * 90 * 0.25; extra = seconds - 180000
+    printf "About %d checks a month, %d vCPU-seconds: ", runs, seconds
+    if (extra <= 0) print "inside the free allowance (about $0 a month)."
+    else printf "about $%.2f a month beyond the free allowance.\n", extra * 0.000024
+  }'
+}
+
 cmd_schedule() {
   settings
-  quiet gcloud run jobs describe "$JOB" --project "$PROJECT" --region "$REGION" \
-    || die "Deploy first: gh workflow run deploy.yml --repo $REPO, then wait for it to finish"
-  log "Scheduler may start the job"
-  gcloud run jobs add-iam-policy-binding "$JOB" --project "$PROJECT" --region "$REGION" \
+  url=$(service_url)
+  [ -n "$url" ] || die "Deploy first: gh workflow run deploy.yml --repo $REPO, then wait for it to finish"
+  log "Scheduler may call the service"
+  gcloud run services add-iam-policy-binding "$SERVICE" --project "$PROJECT" --region "$REGION" \
     --member "serviceAccount:$SCHEDULER_SA" --role roles/run.invoker >/dev/null
   log "Schedule '$SCHEDULE' (UTC)"
-  uri="https://run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/$JOB:run"
   verb=create
   if quiet gcloud scheduler jobs describe "$SCHEDULER_JOB" --project "$PROJECT" --location "$REGION"; then
     verb=update
   fi
+  # The scheduler signs each call with its own identity; the service rejects everyone else.
   gcloud scheduler jobs "$verb" http "$SCHEDULER_JOB" --project "$PROJECT" --location "$REGION" \
-    --schedule "$SCHEDULE" --time-zone Etc/UTC --uri "$uri" --http-method POST \
-    --oauth-service-account-email "$SCHEDULER_SA" --oauth-token-scope https://www.googleapis.com/auth/cloud-platform \
-    --attempt-deadline 180s >/dev/null
+    --schedule "$SCHEDULE" --time-zone Etc/UTC --uri "$url/run" --http-method POST \
+    --oidc-service-account-email "$SCHEDULER_SA" --oidc-token-audience "$url" \
+    --attempt-deadline 280s >/dev/null
   echo "Scheduled."
+  estimate
 }
 
 cmd_commands() {
   settings
+  url=$(service_url)
+  url=${url:-SERVICE_URL}
+  call="curl -X POST -H \"Authorization: Bearer \$(gcloud auth print-identity-token)\" \"$url/run"
   cat <<EOF
 # Deploy (also runs on every push to main that changes the code or config.json)
 gh workflow run deploy.yml --repo $REPO
 
 # Connection tests: these send a message and nothing else
-gh workflow run store-monitor.yml --repo $REPO -f telegram_test=true
-gh workflow run store-monitor.yml --repo $REPO -f discord_test=true
-gcloud run jobs execute $JOB --project $PROJECT --region $REGION --args=--test-discord --wait
+$call?mode=test-telegram"
+$call?mode=test-discord"
 
-# Dry run: read the stores, print what would be sent, save nothing
-gh workflow run store-monitor.yml --repo $REPO -f dry_run=true
+# Dry run: read the stores, log what would be sent, save nothing
+$call?mode=dry-run"
 
 # One real check now (the first one records a quiet baseline)
-gcloud run jobs execute $JOB --project $PROJECT --region $REGION --wait
+$call"
 
-# Logs and history
-gcloud run jobs executions list --job $JOB --project $PROJECT --region $REGION --limit 5
-gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="$JOB"' --project $PROJECT --limit 50 --format 'value(textPayload)'
+# Logs
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="$SERVICE"' --project $PROJECT --limit 50 --format 'value(textPayload)'
 
 # Pause or resume the schedule
 gcloud scheduler jobs pause $SCHEDULER_JOB --project $PROJECT --location $REGION
