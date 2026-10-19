@@ -21,15 +21,29 @@ A small **Cloud Run service** (a quarter vCPU, billed only while a check runs) c
 | --- | --- |
 | `apple.enabled`, `google.enabled` | Which stores to check |
 | `telegram.enabled`, `discord.enabled` | Where to send notifications; at least one must be on |
-| `<destination>.events` | Which event kinds to send, per `apple`, `google` and `monitor` (health alerts). `"*"` sends every kind. Leave `events` out to send everything. |
-| `<destination>.google_tracks` | Limit Google release events to these tracks, for example `["production"]` |
-| `<destination>.exclude_apps` | Games to leave out, by iOS bundle ID, Android package name, or App Store numeric ID. A list, or an object of ID → name. |
+| `discord.channels` | One entry per Discord channel, each with its own webhook, games and events (below). Different games can go to different channels, for example one per studio |
+| `<channel>.id`, `.name`, `.enabled` | `id` (lowercase letters, digits, dashes) names the channel in the queue and in health alerts (`delivery/discord/<id>`). `enabled: false` pauses one channel |
+| `<channel>.webhook_secret` | The secret holding that channel's webhook URL: `DISCORD_WEBHOOK_URL` or `DISCORD_WEBHOOK_URL_<NAME>`. URLs never go into `config.json` |
+| `<channel>.games` | `"all"` (new games appear automatically), or only these games: a list of IDs, or an object of ID → name |
+| `telegram.events`, `<channel>.events` | Which event kinds to send, per `apple`, `google` and `monitor` (health alerts). `"*"` sends every kind. Leave `events` out to send everything. |
+| `telegram.google_tracks`, `<channel>.google_tracks` | Limit Google release events to these tracks, for example `["production"]` |
+| `telegram.exclude_apps`, `<channel>.exclude_apps` | Games to leave out, by iOS bundle ID, Android package name, or App Store numeric ID. A list, or an object of ID → name. |
 | `notification_timezone` | Time zone for the *Observed* time, for example `Europe/London` |
 | `batch_window_seconds` | How long a change into an in-between state (such as a build still processing) waits for its next step, so both go out as one message. Default 600; `0` sends every change at once |
 | `google.apps`, `google.extra_tracks` | Packages or tracks that discovery misses |
 | `google.lifecycle_*` | Budget for Google's separately rate-limited release-status endpoint; the defaults are safe |
 
-As shipped, both destinations are off. Telegram gets everything once enabled. Discord's filter is set to review and release milestones, which suits a shared channel.
+As shipped, both destinations are off. Telegram gets everything once enabled. The one Discord channel, `main`, is set to review and release milestones, which suits a shared channel. An older `discord` section without `channels` still works as a single channel on `DISCORD_WEBHOOK_URL`.
+
+### Settings page
+
+Instead of editing `config.json` by hand, run a local page that lists your games from the monitor's state:
+
+```sh
+python3 -m store_monitor.settings
+```
+
+It opens on `127.0.0.1` (port 8740, or the next free one) and reads `GCP_PROJECT`, `GITHUB_REPO` and `STATE_BUCKET` from `setup.env`; it needs a signed-in `gcloud` and `gh`. Add, pause or remove Discord channels; tick each one's games, events and Google tracks; paste a channel's webhook URL to store it in Secret Manager and GitHub; and send a test message. **Save** writes only `config.json`: commit and push it to deploy. The deploy maps every `webhook_secret` named in `config.json` that exists, and manual workflow runs load every `DISCORD_WEBHOOK_URL*` repository secret. Before the first check there is no state yet, so the page lists only games already named in `config.json`.
 
 ### Event kinds
 
@@ -43,7 +57,7 @@ As shipped, both destinations are off. Telegram gets everything once enabled. Di
 
 ## Behaviour worth knowing
 
-- **Batching.** All changes to one release or build found in the same check are sent as one message. The latest step is the headline (for example **Rollout at 20%**), with the current version, build, track and rollout below it, and earlier steps on a quieter *Earlier: Moved to production* line. A change into an in-between state waits up to `batch_window_seconds` (default 600, about two checks) for the next step. These states are an App Store build still processing, ready for review, accepted, awaiting Apple's release or processing for distribution, and on Google Play, approved but not yet published, or a track configured but not yet confirmed. So a build's *processing* and *completed* steps arrive as one message. A settled state goes out at once together with anything held for that release; if no next step comes, the held message goes out when the window ends. `0` turns holding off. Held messages wait in the outbox in `state.json`, so a restart neither loses nor repeats them. Discord shows only the steps its filter allows.
+- **Batching.** All changes to one release or build found in the same check are sent as one message. The latest step is the headline (for example **Rollout at 20%**), with the current version, build, track and rollout below it, and earlier steps on a quieter *Earlier: Moved to production* line. A change into an in-between state waits up to `batch_window_seconds` (default 600, about two checks) for the next step. These states are an App Store build still processing, ready for review, accepted, awaiting Apple's release or processing for distribution, and on Google Play, approved but not yet published, or a track configured but not yet confirmed. So a build's *processing* and *completed* steps arrive as one message. A settled state goes out at once together with anything held for that release; if no next step comes, the held message goes out when the window ends. `0` turns holding off. Held messages wait in the outbox in `state.json`, so a restart neither loses nor repeats them. Each Discord channel shows only the steps its filter allows.
 - **Quiet first run:** existing releases are recorded without being announced, followed by one **Monitoring connected** message per store.
 - **At-least-once delivery:** each destination acknowledges every message separately, and state is saved after each send. A failing destination keeps its queue without blocking or repeating the other one. A crash between a send and the save can repeat that one message.
 - **Failures:** a store, track or destination that fails three runs in a row raises one **Monitor needs attention** alert, and another when it recovers. A check with errors answers HTTP 500, so it shows as failed in Cloud Scheduler and the service logs.

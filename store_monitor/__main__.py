@@ -6,33 +6,58 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import discord, telegram
-from .delivery import drain, enabled, prepare, routes
+from .delivery import LEGACY_DISCORD, discord_channels, drain, enabled, prepare, routes
 from .events import reconcile
 from .providers import AppleProvider, GoogleProvider, safe_error
 from .state import GCSState, GitHubState, LocalState
 from .telegram import Telegram
 
 
+def legacy_aliases(config):
+    """Discord events queued before channels existed go to the channel that uses their webhook."""
+    for channel in discord_channels(config):
+        if channel["webhook_secret"] == "DISCORD_WEBHOOK_URL":
+            return {LEGACY_DISCORD: channel["destination"]}
+    return {}
+
+
 def senders(config, display_timezone, errors):
     """Senders for the enabled destinations whose credentials are present."""
     result = {}
-    names = enabled(config)
-    if "telegram" in names:
+    if "telegram" in enabled(config):
         if telegram.configured():
             result["telegram"] = Telegram(display_timezone)
         else:
             print("Telegram is enabled but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are not set; Telegram notifications stay queued.")
-    if "discord" in names:
+    for channel in discord_channels(config):
+        name = channel["destination"]
         try:
-            url = discord.webhook_url()
+            url = discord.webhook_url(channel["webhook_secret"])
         except RuntimeError as error:
-            errors["delivery/discord"] = str(error)
-            return result
+            errors["delivery/" + name] = str(error)
+            continue
         if url:
-            result["discord"] = discord.Discord(url, display_timezone)
+            result[name] = discord.Discord(url, display_timezone, destination=name)
         else:
-            print("Discord is enabled but DISCORD_WEBHOOK_URL is not set; Discord notifications stay queued.")
+            print(f"Discord channel {channel['id']} has no {channel['webhook_secret']}; its notifications stay queued.")
     return result
+
+
+def test_discord(config, only=None):
+    """Post a connection test to every listed channel whose webhook is set, enabled or not."""
+    sent = 0
+    for channel in discord_channels(config, include_disabled=True):
+        if only and channel["id"] != only:
+            continue
+        url = discord.webhook_url(channel["webhook_secret"])
+        if not url:
+            print(f"Skipped {channel['id']}: {channel['webhook_secret']} is not set.")
+            continue
+        discord.Discord(url).post(discord.test_payload(channel))
+        print(f"Discord test delivered to {channel['id']}.")
+        sent += 1
+    if not sent:
+        raise RuntimeError("No Discord webhook is set for the channels in config.json")
 
 
 def main(argv=None):
@@ -41,20 +66,17 @@ def main(argv=None):
     parser.add_argument("--local-state", help="Use this state file instead of GitHub")
     parser.add_argument("--dry-run", action="store_true", help="Read stores; do not save state or send messages")
     parser.add_argument("--test-telegram", action="store_true")
-    parser.add_argument("--test-discord", action="store_true", help="Send a connection test to DISCORD_WEBHOOK_URL only")
+    parser.add_argument("--test-discord", action="store_true", help="Send a connection test to the Discord channels only")
+    parser.add_argument("--channel", help="With --test-discord: test only this channel id")
     args = parser.parse_args(argv)
     if args.test_telegram:
         Telegram().post("Game store monitor: Telegram connection verified. Store monitoring will start after account setup is complete.")
         print("Telegram test delivered.")
         return 0
-    if args.test_discord:
-        url = discord.webhook_url()
-        if not url:
-            raise RuntimeError("Missing DISCORD_WEBHOOK_URL")
-        discord.Discord(url).post(discord.test_payload())
-        print("Discord test delivered.")
-        return 0
     config = json.load(open(args.config))
+    if args.test_discord:
+        test_discord(config, args.channel)
+        return 0
     display_timezone = config.get("notification_timezone", "UTC")
     if args.local_state:
         backend = LocalState(args.local_state)
@@ -63,7 +85,7 @@ def main(argv=None):
     else:
         backend = GitHubState()
     # A destination switched off in config.json drops what it still had queued.
-    state = prepare(backend.load(), enabled(config))
+    state = prepare(backend.load(), enabled(config), legacy_aliases(config))
     delivery_errors = {}
     outputs = {} if args.dry_run else senders(config, display_timezone, delivery_errors)
     # Finish previous deliveries before collecting; each destination fails on its own.

@@ -5,27 +5,44 @@ destination removes itself after a confirmed send and the state is saved at
 once, so a failing destination keeps its place in the queue without blocking
 or repeating the others. Delivery stays at least once per destination.
 """
+import re
 import time
 from datetime import datetime, timezone
 
 from .events import held
 from .providers import safe_error
 
-DESTINATIONS = ("telegram", "discord")
+CHANNEL_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+WEBHOOK_SECRET = re.compile(r"DISCORD_WEBHOOK_URL(?:_[A-Z0-9]+)*")
+LEGACY_DISCORD = "discord"  # The destination name used before Discord had channels.
+
+
+def app_ids(values):
+    # A list of IDs, or an object whose keys are IDs and whose values name the game for readers.
+    return {str(item).strip().lower() for item in values or [] if str(item).strip()}
+
+
+def app_keys(event):
+    return {str(event.get(key) or "").lower() for key in ("app_id", "bundle_id")} - {""}
 
 
 def excluded(event, settings):
-    # A list of IDs, or an object whose keys are IDs and whose values name the game for readers.
-    denied = {str(item).strip().lower() for item in settings.get("exclude_apps", []) if str(item).strip()}
-    return bool({str(event.get(key) or "").lower() for key in ("app_id", "bundle_id")} & denied)
+    return bool(app_keys(event) & app_ids(settings.get("exclude_apps")))
+
+
+def included(event, settings):
+    """`games` is "all" (the default) or the only games this destination receives."""
+    games = settings.get("games", "all")
+    return games == "all" or bool(app_keys(event) & app_ids(games))
 
 
 def wants(event, settings):
-    """Whether a destination's config.json section accepts this event.
+    """Whether a destination's settings accept this event.
 
     `events` maps "apple", "google" and "monitor" (health messages) to the kinds
     to send; "*" means every kind, and a missing `events` sends everything.
-    `google_tracks` limits Google release events to those tracks.
+    `google_tracks` limits Google release events to those tracks. `games` and
+    `exclude_apps` choose games; health messages belong to no game.
     """
     if not settings.get("enabled", False):
         return False
@@ -33,29 +50,71 @@ def wants(event, settings):
         kinds = events.get(event.get("store") or "monitor", [])
         if "*" not in kinds and event.get("kind") not in kinds:
             return False
+    if not event.get("store"):
+        return True
     tracks = settings.get("google_tracks")
-    if (tracks is not None and event.get("store") == "google" and not event["kind"].startswith("build_")
+    if (tracks is not None and event["store"] == "google" and not event["kind"].startswith("build_")
             and event.get("track") not in tracks):
         return False
-    return not excluded(event, settings)
+    return included(event, settings) and not excluded(event, settings)
 
+
+def discord_channels(config, include_disabled=False):
+    """Discord channels with their destination names; a section without `channels` is one channel.
+
+    Each channel posts to the webhook in the environment variable (and secret)
+    named by `webhook_secret`, so webhook URLs never enter config.json.
+    """
+    section = config.get("discord", {})
+    if not (section.get("enabled", False) or include_disabled):
+        return []
+    if "channels" not in section:
+        legacy = {key: value for key, value in section.items() if key != "enabled"}
+        return [{**legacy, "id": LEGACY_DISCORD, "name": "Discord", "webhook_secret": "DISCORD_WEBHOOK_URL",
+                 "enabled": True, "destination": LEGACY_DISCORD}]
+    channels, seen = [], set()
+    for channel in section["channels"]:
+        cid, secret = str(channel.get("id", "")), str(channel.get("webhook_secret", ""))
+        if not CHANNEL_ID.fullmatch(cid) or cid in seen:
+            raise RuntimeError(f"Discord channel id {cid!r} must be unique: lowercase letters, digits and dashes")
+        if not WEBHOOK_SECRET.fullmatch(secret):
+            raise RuntimeError(f"Discord channel {cid}: webhook_secret must be DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL_<NAME>")
+        seen.add(cid)
+        if channel.get("enabled", True) or include_disabled:
+            channels.append({**channel, "enabled": True, "destination": f"discord/{cid}"})
+    return channels
 
 def enabled(config):
-    names = {name for name in DESTINATIONS if config.get(name, {}).get("enabled", False)}
+    names = ({"telegram"} if config.get("telegram", {}).get("enabled", False) else set())
+    names |= {channel["destination"] for channel in discord_channels(config)}
     if not names:
         raise RuntimeError("No destination enabled: set telegram.enabled or discord.enabled in config.json")
     return names
 
 
 def routes(config):
-    return {name: (lambda event, settings=config.get(name, {}): wants(event, settings)) for name in DESTINATIONS}
+    """Each enabled destination with the filter from its config.json settings."""
+    result = {}
+    if config.get("telegram", {}).get("enabled", False):
+        result["telegram"] = lambda event, settings=config["telegram"]: wants(event, settings)
+    for channel in discord_channels(config):
+        result[channel["destination"]] = lambda event, channel=channel: wants(event, channel)
+    return result
 
 
-def prepare(state, active):
-    """Upgrade events queued before per-destination delivery and drop destinations that were turned off."""
+def prepare(state, active, aliases=None):
+    """Upgrade events queued by older versions and drop destinations that were turned off.
+
+    `aliases` renames destinations, so Discord events queued before channels
+    existed go to the channel that took over their webhook.
+    """
+    aliases = aliases or {}
     for event in state["outbox"]:
-        # Events without `pending` predate per-destination delivery and were Telegram-only.
-        event["pending"] = [name for name in event.get("pending", ["telegram"]) if name in active]
+        # Older events were queued for Telegram only and have no kind to filter on.
+        names = [aliases.get(name, name) for name in event.get("pending", ["telegram"])]
+        event["pending"] = [name for name in dict.fromkeys(names) if name in active]
+        if visible := event.get("visible"):
+            event["visible"] = {aliases.get(name, name): kinds for name, kinds in visible.items()}
     state["outbox"] = [event for event in state["outbox"] if event["pending"]]
     return state
 

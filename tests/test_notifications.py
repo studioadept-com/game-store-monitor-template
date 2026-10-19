@@ -7,8 +7,9 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from store_monitor import discord
-from store_monitor.delivery import drain, enabled, prepare, routes
+from store_monitor import discord, settings
+from store_monitor.__main__ import legacy_aliases, senders
+from store_monitor.delivery import discord_channels, drain, enabled, prepare, routes
 from store_monitor.events import detect, empty_state, reconcile
 from store_monitor.formatting import TELEGRAM_LIMIT, discord_payload, length, telegram_html
 from store_monitor.http import ApiError
@@ -19,8 +20,9 @@ TZ = "UTC"
 ROUTER = routes
 SHIPPED = json.loads((Path(__file__).parent.parent / "config.json").read_text())
 # Telegram gets everything; Discord uses the shipped milestone filter and leaves one game out.
+MAIN = "discord/main"
 CONFIG = {"telegram": {"enabled": True},
-          "discord": {**SHIPPED["discord"], "enabled": True, "exclude_apps": ["com.example.legacy"]}}
+          "discord": {"enabled": True, "channels": [{**SHIPPED["discord"]["channels"][0], "exclude_apps": ["com.example.legacy"]}]}}
 
 
 def google(**fields):
@@ -55,7 +57,7 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(kinds(google(status="in review", phase=None, rollout=None), google()), ["published", "rollout_started"])
         self.assertEqual(kinds(google(), google(rollout=50)), ["rollout_changed"])
         self.assertEqual(kinds(google(rollout=50), google(phase="completed", rollout=100)), ["rollout_completed"])
-        both, internal = [["telegram", "discord"]], [["telegram"]]
+        both, internal = [["telegram", MAIN]], [["telegram"]]
         pending = lambda old, new, config=CONFIG: [event["pending"] for event in queued(old, new, config)]
         self.assertEqual(pending(apple(status="draft"), apple()), both)
         self.assertEqual(pending(google(), google(rollout=50)), both)
@@ -64,10 +66,68 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(pending(google(track="beta"), google(track="beta", rollout=50)), internal)
         legacy = google(app_id="com.example.legacy")
         self.assertEqual(pending(legacy, {**legacy, "rollout": 50}), internal)
-        discord_only = {"discord": {"enabled": True}}
+        discord_only = {"discord": {"enabled": True}}  # The layout before channels: one channel, old name.
         self.assertEqual(pending(None, apple(status="draft"), discord_only), [["discord"]])
         with self.assertRaisesRegex(RuntimeError, "No destination enabled"):
             enabled(SHIPPED)  # Neither destination is on until the owner chooses.
+
+
+class ChannelsTest(unittest.TestCase):
+    STUDIO = {"id": "studio-a", "name": "Studio A", "webhook_secret": "DISCORD_WEBHOOK_URL_STUDIO_A",
+              "games": {"com.example.miner": "Sample Miner"}, "events": {"apple": ["*"], "google": ["*"]}}
+
+    def test_each_channel_gets_its_own_games_and_events(self):
+        config = {"telegram": {"enabled": True}, "discord": {"enabled": True, "channels": [*CONFIG["discord"]["channels"], self.STUDIO]}}
+        miner = google(app_id="com.example.miner", app_name="Sample Miner")
+        pending = lambda old, new: [event["pending"] for event in queued(old, new, config)]
+        self.assertEqual(pending(miner, {**miner, "rollout": 50}), [["telegram", MAIN, "discord/studio-a"]])
+        self.assertEqual(pending(google(), google(rollout=50)), [["telegram", MAIN]])  # The runner is not Studio A's.
+        self.assertEqual(pending({**miner, "track": "beta"}, {**miner, "track": "beta", "rollout": 50}),
+                         [["telegram", "discord/studio-a"]])  # Studio A takes every track.
+        off = {"telegram": {"enabled": True}, "discord": {"enabled": True, "channels": [{**self.STUDIO, "enabled": False}]}}
+        self.assertEqual([e["pending"] for e in queued(miner, {**miner, "rollout": 50}, off)], [["telegram"]])
+        self.assertEqual([c["destination"] for c in discord_channels(off, include_disabled=True)], ["discord/studio-a"])
+        legacy = {"discord": {"enabled": True, "exclude_apps": []}}  # Before channels: one channel, old name.
+        self.assertEqual([c["destination"] for c in discord_channels(legacy)], ["discord"])
+        for bad in ({**self.STUDIO, "id": "Studio A"}, {**self.STUDIO, "webhook_secret": "TELEGRAM_BOT_TOKEN"}):
+            with self.assertRaises(RuntimeError):
+                discord_channels({"discord": {"enabled": True, "channels": [bad]}})
+
+    def test_queued_events_move_to_the_channel_on_the_old_webhook(self):
+        state = empty_state()
+        state["outbox"] = [{"id": 1, "text": "x", "pending": ["telegram", "discord"], "visible": {"discord": ["published"]}}]
+        state = prepare(state, enabled(CONFIG), legacy_aliases(CONFIG))
+        self.assertEqual(state["outbox"][0]["pending"], ["telegram", MAIN])
+        self.assertEqual(state["outbox"][0]["visible"], {MAIN: ["published"]})
+        config = {"telegram": {"enabled": True}, "discord": {"enabled": True, "channels": [*CONFIG["discord"]["channels"], self.STUDIO]}}
+        errors = {}
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1",
+                                       "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/1/a",
+                                       "DISCORD_WEBHOOK_URL_STUDIO_A": "https://evil.example/hook"}):
+            outputs = senders(config, TZ, errors)
+        self.assertEqual(set(outputs), {"telegram", MAIN})
+        self.assertEqual(errors, {"delivery/discord/studio-a": "DISCORD_WEBHOOK_URL_STUDIO_A is not a Discord webhook URL"})
+
+    def test_settings_page_lists_games_once_and_keeps_config_style(self):
+        state = {"scopes": {
+            "apple/1": {"store": "apple", "app_id": "1", "bundle_id": "com.example.miner", "app_name": "Sample Miner"},
+            "apple/1/builds": {"store": "apple", "app_id": "1", "kind": "builds"},
+            "google/com.example.miner": {"store": "google", "app_id": "com.example.miner", "app_name": "Miner"},
+            "google/com.example.miner/production": {"store": "google", "app_id": "com.example.miner",
+                                                        "releases": {"r": {"track": "qa", "app_name": "Miner"}}}}}
+        found = settings.games(state, CONFIG)
+        miner = next(game for game in found if game["key"] == "com.example.miner")
+        self.assertEqual(miner["names"], {"apple": "Sample Miner", "google": "Miner"})
+        self.assertEqual(miner["ids"], ["1", "com.example.miner"])
+        self.assertTrue(next(game for game in found if game["key"] == "com.example.legacy")["unseen"])
+        self.assertIn("qa", settings.google_tracks(state, SHIPPED))
+        self.assertEqual(json.loads(settings.dumps(SHIPPED)), SHIPPED)
+        with tempfile.TemporaryDirectory() as directory:
+            page = settings.Settings(Path(directory) / "config.json", state, None, {})
+            with self.assertRaises(RuntimeError):
+                page.save({"discord": {"enabled": True, "channels": [{**self.STUDIO, "webhook_secret": "ASC_PRIVATE_KEY"}]}})
+            with self.assertRaises(ValueError):
+                page.store_webhook("DISCORD_WEBHOOK_URL", "https://example.com/not-discord")
 
 
 class BatchingTest(unittest.TestCase):
@@ -81,12 +141,12 @@ class BatchingTest(unittest.TestCase):
     def test_steps_seen_in_one_run_become_one_message(self):
         event, = queued(google(status="in review", phase=None, rollout=None), google())
         self.assertEqual(event["kinds"], ["published", "rollout_started"])
-        self.assertEqual(event["pending"], ["telegram", "discord"])
+        self.assertEqual(event["pending"], ["telegram", MAIN])
         message = telegram_html(event, TZ)
         self.assertIn("— <b>Rollout at 20%</b>\n", message)  # The latest step leads.
         self.assertIn("Rollout <b>20%</b>\n<i>Earlier: Moved to production</i>", message)
         # The milestone channel shows only the steps its filter allows, so no "Earlier" line either.
-        embed = discord_payload(event, TZ)["embeds"][0]
+        embed = discord_payload(event, TZ, MAIN)["embeds"][0]
         self.assertTrue(embed["title"].endswith("— Moved to production"))
         self.assertNotIn("description", embed)
         # Events queued before batching have no steps and still render.

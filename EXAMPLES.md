@@ -112,7 +112,7 @@ Added cloud saves</blockquote>
 ### Monitor health
 
 > ⚠️ **Monitor needs attention**\
-> delivery/discord\
+> delivery/discord/main\
 > Discord: HTTP 404. Checks have failed 3 times; previous release state is preserved.
 
 Messages queued before this format existed are sent once as the plain text they were queued with.
@@ -126,7 +126,7 @@ One embed per event, with a blue bar for the App Store and a green bar for Googl
 | App Store | Waiting for review, In review, Moved to production (live) |
 | Google Play, production track | Moved to production (confirmed by the release-status API), rollout percentage changes, rollout paused, resumed, and completed |
 
-Games listed in `config.json` → `discord.exclude_apps` never appear. Change `discord.events` to send more; see the README.
+Games in the channel's `exclude_apps` never appear. Change the channel's `events` to send more, or add channels with their own games; see the README.
 
 A combined message shows only the steps Discord's filter allows, so the first example above appears there as a single-step message, **Sample Runner — Moved to production**.
 

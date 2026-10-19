@@ -20,6 +20,7 @@ Collect these answers before you start:
 | Their GitHub repository, `owner/name` | `GITHUB_REPO` |
 | Which stores: App Store, Google Play, or both | `apple.enabled`, `google.enabled` |
 | Where to send notifications: Telegram, Discord, or both | `telegram.enabled`, `discord.enabled` |
+| For Discord: one channel, or several (for example one per studio), and which games go to each | `discord.channels` |
 | What each destination should get: every event, or only review and release milestones | `events` (see README) |
 | Games to leave out, as bundle IDs or package names | `exclude_apps` |
 | Time zone for timestamps, for example `Europe/London` | `notification_timezone` |
@@ -72,6 +73,8 @@ Set up at least one.
 scripts/setup-gcp.sh secret DISCORD_WEBHOOK_URL
 ```
 
+For each further channel, store its webhook as `DISCORD_WEBHOOK_URL_<NAME>` (for example `scripts/setup-gcp.sh secret DISCORD_WEBHOOK_URL_STUDIO_B`) and add a `discord.channels` entry with that `webhook_secret`. The owner can also do all of this in the settings page (`python3 -m store_monitor.settings`; see the README).
+
 **Telegram.** Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy its token. Add the bot to the chat or group and send the chat a message. Then store the token and look up the chat ID without printing the token:
 
 ```sh
@@ -84,8 +87,8 @@ scripts/setup-gcp.sh secret TELEGRAM_CHAT_ID
 
 1. Edit `config.json` to match step 0:
    - Set `enabled: true` on each chosen destination and `enabled: false` on any unused store.
-   - Adjust `events`, `google_tracks` and `exclude_apps`, and set `notification_timezone`. Leave `batch_window_seconds` at 600 unless the owner wants every in-between step sent at once (`0`).
-   - If Discord is the only destination, consider adding `"monitor": ["*"]` to its `events`, so health alerts reach someone.
+   - Adjust `events`, `google_tracks`, `games` and `exclude_apps` (per Discord channel), and set `notification_timezone`. Leave `batch_window_seconds` at 600 unless the owner wants every in-between step sent at once (`0`).
+   - If Discord is the only destination, consider adding `"monitor": ["*"]` to one channel's `events`, so health alerts reach someone.
 2. Commit and push to `main`. `deploy.yml` tests, builds and deploys the Cloud Run service `store-monitor`, mapping only the secrets that exist. Until `scripts/setup-gcp.sh infra` (or `variables`) has set the repository variables, the deploy job shows as **skipped**, not failed; the first real deploy is the first push to `main` after that, or a manual run. Watch it with `gh run watch --repo YOUR_GITHUB_OWNER/YOUR_REPO`. A secret added later needs another deploy: `gh workflow run deploy.yml --repo YOUR_GITHUB_OWNER/YOUR_REPO`.
 3. Run `scripts/setup-gcp.sh commands`. It prints ready-to-run `curl` calls to the service, signed with your own Google identity (the service rejects unsigned calls). Send the connection tests first (`mode=test-discord`, `mode=test-telegram`). They send one message and change nothing.
 4. Run the first real check (the `curl` without a mode), which records a quiet baseline, then check its logs for errors. A Play `403` usually means the Play Console invite is missing or hasn't propagated yet; it can take up to a day.
@@ -102,7 +105,7 @@ The first successful check of each store records every current release **without
 | --- | --- | --- | --- |
 | `ASC_ISSUER_ID`, `ASC_KEY_ID`, `ASC_PRIVATE_KEY` | secret | Secret Manager + GitHub | App Store is monitored |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | secret | Secret Manager + GitHub | Telegram is enabled |
-| `DISCORD_WEBHOOK_URL` | secret | Secret Manager + GitHub | Discord is enabled (`none` = skip for now) |
+| `DISCORD_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL_<NAME>` | secret | Secret Manager + GitHub | A Discord channel names it in `webhook_secret` (`none` = skip for now) |
 | `GCP_PROJECT`, `GCP_REGION` | variable | GitHub | always |
 | `STATE_BUCKET` | variable | GitHub | always |
 | `IMAGE` | variable | GitHub | always (`REGION-docker.pkg.dev/PROJECT/store-monitor/monitor`) |

@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="settings-token" content="__TOKEN__">
+<title>Store monitor settings</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #667085; --line: #e3e6eb;
+    --accent: #5865f2; --accent-text: #fff; --ok: #12805c; --warn: #b54708; --bad: #c4320a; --chip: #eef0f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161b; --card: #1d2027; --text: #e7e9ee; --muted: #9aa1ad; --line: #2e323b;
+            --accent: #7983f5; --ok: #3ccb8f; --warn: #f5a524; --bad: #ff7a59; --chip: #272b33; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--line);
+           padding: 12px 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .meta { color: var(--muted); font-size: 12px; flex: 1; min-width: 200px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 80px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+           border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=password], input[type=search] { font: inherit; padding: 6px 8px; border: 1px solid var(--line);
+           border-radius: 6px; background: var(--bg); color: var(--text); width: 100%; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 180px; }
+  label.field { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  h2 { font-size: 15px; margin: 0; }
+  h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 16px; }
+  .check { display: flex; gap: 6px; align-items: flex-start; padding: 2px 0; }
+  .check input { margin-top: 3px; }
+  .muted { color: var(--muted); }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; background: var(--chip); color: var(--muted); margin-left: 4px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .games { max-height: 340px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin-top: 8px; }
+  .game { display: flex; gap: 8px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--line); }
+  .game:last-child { border-bottom: 0; }
+  .game .id { color: var(--muted); font-size: 12px; margin-left: auto; text-align: right; word-break: break-all; }
+  .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+           padding: 10px 16px; border-radius: 8px; max-width: min(90vw, 640px); display: none; white-space: pre-line; }
+  .disabled-card { opacity: .65; }
+  details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Store monitor · Discord channels</h1>
+  <div class="meta" id="meta">Loading…</div>
+  <span id="dirty" class="warn" hidden>Unsaved changes</span>
+  <button class="primary" id="save" disabled>Save config.json</button>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <label class="check"><input type="checkbox" id="discordEnabled"> <b>Send to Discord</b></label>
+      <span class="muted grow">Off stops every channel and drops what they still had queued. Telegram always receives everything.</span>
+      <button id="addChannel">Add channel</button>
+    </div>
+  </div>
+  <div id="channels"></div>
+  <p class="muted">Saving writes config.json only. Commit and push it to <code>main</code> to deploy; the deploy maps every channel's webhook secret that exists.</p>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const TOKEN = document.querySelector('meta[name=settings-token]').content;
+const MILESTONES = {
+  apple: ["waiting_for_review", "in_review", "published"],
+  google: ["published", "rollout_changed", "rollout_paused", "rollout_resumed", "rollout_completed"],
+  monitor: [],
+};
+const STORE_LABEL = {apple: "App Store", google: "Google Play", monitor: "Monitor health", config: "only in config"};
+let data, config, dirty = false;
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tag, attrs = {}, ...children) => {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (key === "checked" || key === "disabled" || key === "value") node[key] = value;
+    else if (value !== false && value != null) node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const child of children.flat()) if (child != null) node.append(child);
+  return node;
+};
+
+function toast(text, ms = 4000) {
+  const box = $("#toast");
+  box.textContent = text; box.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => box.style.display = "none", ms);
+}
+
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json", "X-Settings-Token": TOKEN}, body: JSON.stringify(body)});
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  return payload;
+}
+
+function markDirty() { dirty = true; $("#dirty").hidden = false; $("#save").disabled = false; }
+
+// games / exclude_apps may be a list or an object of id -> name; the page keeps objects.
+const asObject = value => Array.isArray(value) ? Object.fromEntries(value.map(id => [id, ""])) : (value && typeof value === "object" ? value : {});
+const lower = object => new Set(Object.keys(object).map(key => key.toLowerCase()));
+const gameName = game => Object.values(game.names)[0];
+
+function normalise(channel) {
+  channel.exclude_apps = asObject(channel.exclude_apps);
+  if (channel.games !== "all") channel.games = asObject(channel.games);
+  channel.events = channel.events || {apple: ["*"], google: ["*"], monitor: ["*"]};
+  for (const store of ["apple", "google", "monitor"]) channel.events[store] = channel.events[store] || [];
+}
+
+function receives(channel, game) {
+  const excluded = lower(channel.exclude_apps);
+  if (game.ids.some(id => excluded.has(id))) return false;
+  return channel.games === "all" || game.ids.some(id => lower(channel.games).has(id));
+}
+
+function removeIds(object, ids) {
+  for (const key of Object.keys(object)) if (ids.includes(key.toLowerCase())) delete object[key];
+}
+
+function setReceives(channel, game, on) {
+  const label = gameName(game) + (game.names.apple && !game.names.google ? " (iOS)" : game.names.google && !game.names.apple ? " (Android)" : "");
+  if (channel.games === "all") {
+    if (on) removeIds(channel.exclude_apps, game.ids);
+    else channel.exclude_apps[game.key] = label;
+  } else {
+    removeIds(channel.exclude_apps, game.ids);
+    if (on) channel.games[game.key] = label; else removeIds(channel.games, game.ids);
+  }
+}
+
+function setMode(channel, mode) {
+  const current = data.games.filter(game => receives(channel, game));
+  if (mode === "all") {
+    channel.games = "all"; channel.exclude_apps = {};
+    for (const game of data.games) if (!current.includes(game) && !game.unseen) setReceives(channel, game, false);
+  } else {
+    channel.games = {}; channel.exclude_apps = {};
+    for (const game of current) if (!game.unseen) setReceives(channel, game, true);
+  }
+}
+
+function secretFor(id) { return "DISCORD_WEBHOOK_URL_" + id.toUpperCase().replace(/-/g, "_"); }
+const slug = text => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "channel";
+
+function addChannel() {
+  const ids = new Set(config.discord.channels.map(channel => channel.id));
+  let n = config.discord.channels.length + 1, id = "channel-" + n;
+  while (ids.has(id)) id = "channel-" + (++n);
+  config.discord.channels.push({id, name: "New channel", enabled: true, webhook_secret: secretFor(id), games: {},
+    exclude_apps: {}, events: structuredClone(MILESTONES), google_tracks: ["production"]});
+  markDirty(); render();
+}
+
+function eventSection(channel) {
+  const wrap = el("div");
+  wrap.append(el("h3", {}, "What is sent ",
+    el("button", {class: "small", onclick: () => { channel.events = structuredClone(MILESTONES); markDirty(); render(); }}, "Review & release milestones"), " ",
+    el("button", {class: "small", onclick: () => { channel.events = {apple: ["*"], google: ["*"], monitor: []}; markDirty(); render(); }}, "Every store event")));
+  const cols = el("div", {class: "cols"});
+  for (const store of ["apple", "google", "monitor"]) {
+    const kinds = channel.events[store];
+    const all = kinds.includes("*");
+    const column = el("div", {}, el("div", {}, el("b", {}, STORE_LABEL[store])));
+    for (const [kind, label] of data.events[store]) {
+      column.append(el("label", {class: "check"}, el("input", {type: "checkbox", checked: all || kinds.includes(kind), onchange: event => {
+        let list = all ? data.events[store].map(([k]) => k) : kinds.filter(k => k !== kind);
+        if (event.target.checked) list.push(kind);
+        channel.events[store] = [...new Set(list)];
+        markDirty(); render();
+      }}), el("span", {}, label)));
+    }
+    if (store === "google") {
+      column.append(el("div", {class: "muted", style: "margin-top:8px"}, "Google tracks"));
+      const tracks = channel.google_tracks;
+      for (const track of data.tracks) {
+        column.append(el("label", {class: "check"}, el("input", {type: "checkbox", checked: !tracks || tracks.includes(track), onchange: event => {
+          let list = tracks ? tracks.filter(t => t !== track) : data.tracks.filter(t => t !== track);
+          if (event.target.checked) list.push(track);
+          channel.google_tracks = list; markDirty(); render();
+        }}), el("span", {}, track)));
+      }
+    }
+    cols.append(column);
+  }
+  wrap.append(cols);
+  return wrap;
+}
+
+function gameSection(channel, index) {
+  const wrap = el("div");
+  const count = data.games.filter(game => !game.unseen && receives(channel, game)).length;
+  const total = data.games.filter(game => !game.unseen).length;
+  const mode = channel.games === "all" ? "all" : "only";
+  const name = "mode-" + index;
+  wrap.append(el("h3", {}, `Games · ${count} of ${total}`));
+  wrap.append(el("div", {class: "row"},
+    el("label", {class: "check"}, el("input", {type: "radio", name, checked: mode === "all", onchange: () => { setMode(channel, "all"); markDirty(); render(); }}),
+      el("span", {}, "All games except unticked ", el("span", {class: "muted"}, "(new games are included automatically)"))),
+    el("label", {class: "check"}, el("input", {type: "radio", name, checked: mode === "only", onchange: () => { setMode(channel, "only"); markDirty(); render(); }}),
+      el("span", {}, "Only ticked games ", el("span", {class: "muted"}, "(new games stay out)")))));
+  const search = el("input", {type: "search", placeholder: "Filter games…", oninput: () => {
+    const q = search.value.toLowerCase();
+    for (const row of list.children) row.hidden = !row.dataset.search.includes(q);
+  }});
+  const list = el("div", {class: "games"});
+  for (const game of data.games) {
+    const stores = Object.keys(game.names).map(store => el("span", {class: "badge"}, STORE_LABEL[store]));
+    const names = [...new Set(Object.values(game.names))].join(" / ");
+    list.append(el("label", {class: "game", "data-search": (names + " " + game.ids.join(" ")).toLowerCase()},
+      el("input", {type: "checkbox", checked: receives(channel, game), onchange: event => { setReceives(channel, game, event.target.checked); markDirty(); render(); }}),
+      el("span", {}, names, stores, game.unseen ? el("span", {class: "badge warn"}, "not seen in the stores") : null),
+      el("span", {class: "id"}, game.key)));
+  }
+  wrap.append(el("div", {class: "row"}, el("div", {class: "grow"}, search),
+    el("button", {class: "small", onclick: () => { for (const g of data.games) if (!g.unseen) setReceives(channel, g, true); markDirty(); render(); }}, "Tick all"),
+    el("button", {class: "small", onclick: () => { for (const g of data.games) if (!g.unseen) setReceives(channel, g, false); markDirty(); render(); }}, "Untick all")));
+  wrap.append(list);
+  return wrap;
+}
+
+function webhookSection(channel) {
+  const stored = data.secrets[channel.webhook_secret];
+  const status = stored === true ? el("span", {class: "ok"}, "✓ stored in Secret Manager")
+    : stored === false ? el("span", {class: "warn"}, "not stored yet") : el("span", {class: "muted"}, "unknown (save to check)");
+  const url = el("input", {type: "password", placeholder: "Paste webhook URL: https://discord.com/api/webhooks/…", autocomplete: "off"});
+  const store = el("button", {onclick: async () => {
+    store.disabled = true;
+    try {
+      const result = await api("/api/webhook", {secret: channel.webhook_secret, url: url.value});
+      const lines = result.steps.map(s => `${s.ok ? "✓" : "✗"} ${s.step}${s.detail ? ": " + s.detail : ""}`);
+      if (result.steps.every(s => s.ok)) { data.secrets[channel.webhook_secret] = true; url.value = ""; render(); }
+      toast(lines.join("\n"), 8000);
+    } catch (error) { toast(error.message); } finally { store.disabled = false; }
+  }}, "Store webhook");
+  const test = el("button", {onclick: async () => {
+    test.disabled = true;
+    try { await api("/api/test", {secret: channel.webhook_secret, url: url.value, name: channel.name}); toast("Test message sent to " + channel.name); }
+    catch (error) { toast(error.message); } finally { test.disabled = false; }
+  }}, "Send test");
+  return el("div", {},
+    el("h3", {}, "Webhook"),
+    el("div", {class: "row"},
+      el("div", {class: "grow"}, el("label", {class: "field"}, "Secret name (the URL itself never goes into config.json)"),
+        el("input", {type: "text", value: channel.webhook_secret, onchange: event => { channel.webhook_secret = event.target.value.trim(); markDirty(); render(); }})),
+      el("div", {}, el("label", {class: "field"}, "Status"), status)),
+    el("div", {class: "row", style: "margin-top:8px"}, el("div", {class: "grow"}, url), store, test),
+    el("div", {class: "muted", style: "font-size:12px;margin-top:4px"},
+      "Discord: Channel settings → Integrations → Webhooks → New Webhook → Copy Webhook URL. Store writes it to Secret Manager and the GitHub secret of the same name. Send test uses the pasted URL, or the stored one."));
+}
+
+function render() {
+  const root = $("#channels");
+  root.replaceChildren();
+  $("#discordEnabled").checked = !!config.discord.enabled;
+  config.discord.channels.forEach((channel, index) => {
+    const autoSecret = channel.webhook_secret === secretFor(channel.id);
+    const card = el("div", {class: "card" + (channel.enabled === false || !config.discord.enabled ? " disabled-card" : "")},
+      el("div", {class: "row"},
+        el("div", {class: "grow"}, el("label", {class: "field"}, "Channel name"),
+          el("input", {type: "text", value: channel.name || "", onchange: event => { channel.name = event.target.value; markDirty(); render(); }})),
+        el("div", {style: "width:200px"}, el("label", {class: "field"}, "Id (used in queue and health names)"),
+          el("input", {type: "text", value: channel.id, onchange: event => {
+            const id = slug(event.target.value);
+            if (config.discord.channels.some(other => other !== channel && other.id === id)) { toast("Another channel already uses " + id); render(); return; }
+            if (autoSecret) channel.webhook_secret = secretFor(id);
+            channel.id = id; markDirty(); render();
+          }})),
+        el("label", {class: "check"}, el("input", {type: "checkbox", checked: channel.enabled !== false, onchange: event => { channel.enabled = event.target.checked; markDirty(); render(); }}), "Enabled"),
+        el("button", {class: "small", onclick: () => {
+          if (!confirm(`Remove ${channel.name || channel.id}? Anything still queued for it is dropped after you save and deploy.`)) return;
+          config.discord.channels.splice(index, 1); markDirty(); render();
+        }}, "Remove")),
+      webhookSection(channel), eventSection(channel), gameSection(channel, index));
+    root.append(card);
+  });
+  if (!config.discord.channels.length) root.append(el("div", {class: "card muted"}, "No channels yet. Add one to start."));
+}
+
+async function load() {
+  data = await api("/api/data");
+  config = data.config;
+  config.discord = config.discord || {enabled: false};
+  if (!config.discord.channels) {
+    // Older single-webhook layout: becomes the first channel, on the same secret.
+    const {enabled, ...rest} = config.discord;
+    config.discord = {enabled: !!enabled, channels: [{id: "main", name: "Discord", enabled: true, webhook_secret: "DISCORD_WEBHOOK_URL", games: "all", ...rest}]};
+    markDirty();
+  }
+  config.discord.channels.forEach(normalise);
+  const seen = data.games.filter(game => !game.unseen).length;
+  $("#meta").textContent = `${data.configPath} · ${seen} games from ${data.state || "config.json only (no state found)"}` +
+    (data.project ? ` · project ${data.project}` : " · set GCP_PROJECT in setup.env to store webhooks") + (data.repo ? ` · ${data.repo}` : "");
+  render();
+}
+
+$("#discordEnabled").addEventListener("change", event => { config.discord.enabled = event.target.checked; markDirty(); render(); });
+$("#addChannel").addEventListener("click", addChannel);
+$("#save").addEventListener("click", async () => {
+  try {
+    await api("/api/config", {config});
+    dirty = false; $("#dirty").hidden = true; $("#save").disabled = true;
+    const missing = config.discord.channels.filter(c => c.enabled !== false && data.secrets[c.webhook_secret] === false);
+    toast("Saved config.json. Commit and push it to main to deploy." +
+      (missing.length ? "\nNo webhook stored yet for: " + missing.map(c => c.name || c.id).join(", ") : ""), 7000);
+    const fresh = await api("/api/data"); data.secrets = fresh.secrets; render();
+  } catch (error) { toast("Not saved: " + error.message, 7000); }
+});
+window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
+load().catch(error => { $("#meta").textContent = "Could not load: " + error.message; });
+</script>
+</body>
+</html>

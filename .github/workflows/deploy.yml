@@ -70,8 +70,11 @@ jobs:
       - name: Update Cloud Run service
         run: |
           # Map only the secrets that exist, so Telegram, Discord and either store can be left out.
+          # Each Discord channel in config.json names its own webhook secret.
+          webhooks=$(python3 -c 'import json; print(" ".join(sorted({c["webhook_secret"] for c in json.load(open("config.json")).get("discord", {}).get("channels", []) if c.get("webhook_secret")} | {"DISCORD_WEBHOOK_URL"})))')
           mapped=""
-          for name in TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID DISCORD_WEBHOOK_URL ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY; do
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY $webhooks; do
+            [[ "$name" =~ ^[A-Z0-9_]+$ ]] || { echo "Bad secret name in config.json: $name" >&2; exit 1; }
             if output=$(gcloud secrets describe "$name" --project "$PROJECT" --format="value(name)" 2>&1); then
               mapped="${mapped:+$mapped,}$name=$name:latest"
             elif ! grep -q NOT_FOUND <<<"$output"; then

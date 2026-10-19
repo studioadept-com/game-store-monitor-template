@@ -14,6 +14,7 @@
 #   infra                 APIs, service accounts, bucket, image registry, IAM, keyless GitHub sign-in
 #   variables             GitHub repository variables the workflows read
 #   secret NAME [FILE]    Store a secret in Secret Manager and GitHub; prompts unless FILE is given
+#                         (or use the settings page: python3 -m store_monitor.settings)
 #   schedule              After the first deploy: call the service on SCHEDULE, and estimate the cost
 #   commands              Print run, test, dry-run, log and pause/resume commands
 set -euo pipefail
@@ -169,7 +170,8 @@ cmd_secret() {
   file=${2:-}
   case " $SECRETS " in
     *" $name "*) ;;
-    *) die "Usage: $0 secret NAME [FILE], where NAME is one of: $SECRETS" ;;
+    *) [[ "$name" =~ ^DISCORD_WEBHOOK_URL(_[A-Z0-9]+)+$ ]] ||  # Another Discord channel's webhook.
+         die "Usage: $0 secret NAME [FILE], where NAME is one of: $SECRETS, or DISCORD_WEBHOOK_URL_<CHANNEL>" ;;
   esac
   if [ -n "$file" ]; then
     [ -f "$file" ] || die "No such file: $file"

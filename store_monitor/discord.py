@@ -1,6 +1,8 @@
-"""Optional Discord webhook destination.
+"""Discord webhook destinations, one per channel in config.json.
 
-Which events reach Discord is set in config.json (see delivery.wants).
+Each channel chooses its games, event kinds and Google tracks (see
+delivery.wants) and posts to the webhook in its own secret. Telegram keeps
+receiving everything.
 """
 import os
 import re
@@ -15,14 +17,18 @@ WEBHOOK = re.compile(r"https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/(?:
 MAX_RETRY_WAIT = 30  # Longer rate-limit waits leave the event queued for the next run.
 
 
-def webhook_url():
-    """The configured webhook, or None. `none` lets the secret exist before the URL arrives."""
-    value = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+def valid(url):
+    return bool(WEBHOOK.fullmatch(url.strip()))
+
+
+def webhook_url(secret="DISCORD_WEBHOOK_URL"):
+    """The webhook in this environment variable, or None. `none` lets the secret exist before the URL arrives."""
+    value = os.environ.get(secret, "").strip()
     if value.lower() in ("", "none"):
         return None
-    if not WEBHOOK.fullmatch(value):
+    if not valid(value):
         # Never echo the value: it contains the webhook token.
-        raise RuntimeError("DISCORD_WEBHOOK_URL is not a Discord webhook URL")
+        raise RuntimeError(f"{secret} is not a Discord webhook URL")
     return value
 
 
@@ -40,13 +46,14 @@ def retry_after(response):
 class Discord:
     interval = 1.0  # Webhooks allow about 30 messages a minute per channel.
 
-    def __init__(self, url, display_timezone="UTC", session=None):
+    def __init__(self, url, display_timezone="UTC", session=None, destination="discord"):
         self.url = url
         self.display_timezone = display_timezone
         self.session = session or requests.Session()
+        self.destination = destination  # Picks the steps of a combined message this channel may see.
 
     def send(self, event):
-        self.post(discord_payload(event, self.display_timezone))
+        self.post(discord_payload(event, self.display_timezone, self.destination))
 
     def post(self, payload):
         for attempt in range(3):
@@ -73,8 +80,9 @@ class Discord:
             return
 
 
-def test_payload():
+def test_payload(channel=None):
+    name = (channel or {}).get("name")
     return {"allowed_mentions": {"parse": []}, "embeds": [{
-        "title": "Release notifications connected", "color": 0x5865F2,
-        "description": "This channel will receive the store events selected in config.json.",
+        "title": "Release notifications connected" + (f" — {name}" if name else ""), "color": 0x5865F2,
+        "description": "This channel will receive the game store updates chosen for it in the monitor's settings.",
     }]}

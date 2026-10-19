@@ -19,13 +19,22 @@
   },
   "discord": {
     "enabled": false,
-    "exclude_apps": [],
-    "events": {
-      "apple": ["waiting_for_review", "in_review", "published"],
-      "google": ["published", "rollout_changed", "rollout_paused", "rollout_resumed", "rollout_completed"],
-      "monitor": []
-    },
-    "google_tracks": ["production"]
+    "channels": [
+      {
+        "id": "main",
+        "name": "Releases",
+        "enabled": true,
+        "webhook_secret": "DISCORD_WEBHOOK_URL",
+        "games": "all",
+        "exclude_apps": [],
+        "events": {
+          "apple": ["waiting_for_review", "in_review", "published"],
+          "google": ["published", "rollout_changed", "rollout_paused", "rollout_resumed", "rollout_completed"],
+          "monitor": []
+        },
+        "google_tracks": ["production"]
+      }
+    ]
   },
   "batch_window_seconds": 600,
   "failure_threshold": 3,

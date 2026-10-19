@@ -12,7 +12,7 @@ run-name: Manual game store check
         type: boolean
         default: false
       discord_test:
-        description: Send a Discord connection test only
+        description: Send a connection test to every Discord channel only
         type: boolean
         default: false
       dry_run:
@@ -49,12 +49,22 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
           create_credentials_file: true
+      - name: Load Discord webhooks
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        # Each Discord channel names its own DISCORD_WEBHOOK_URL* secret in config.json.
+        run: |
+          python - <<'EOF' >> "$GITHUB_ENV"
+          import json, os, re
+          for name, value in json.loads(os.environ["ALL_SECRETS"]).items():
+              if re.fullmatch(r"DISCORD_WEBHOOK_URL(_[A-Z0-9]+)*", name) and "\n" not in value:
+                  print(f"{name}={value}")
+          EOF
       - name: Check stores and send changes
         env:
           STATE_BUCKET: ${{ vars.STATE_BUCKET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}

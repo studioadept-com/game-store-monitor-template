@@ -110,10 +110,15 @@ def telegram_html(event, display_timezone):
     return fit(build, event.get("notes", ""), TELEGRAM_LIMIT)
 
 
-def discord_payload(event, display_timezone):
+def discord_payload(event, display_timezone, destination="discord"):
     """One embed coloured by store; mentions never ping anyone."""
+    if event.get("store") not in STORES:  # A health message, for channels that chose them.
+        embed = {"title": fit(discord_escape, event.get("title", "Store monitor"), DISCORD_TITLE_LIMIT),
+                 "description": fit(discord_escape, str(event.get("detail") or event.get("text", "")), DISCORD_FIELD_LIMIT),
+                 "color": 0x5865F2}
+        return {"embeds": [embed], "allowed_mentions": {"parse": []}}
     icon, store, colour = STORES[event["store"]]
-    titles = step_titles(event, "discord")
+    titles = step_titles(event, destination)
     title = preview(f"{event['app_name']} — {titles[-1]}", DISCORD_TITLE_LIMIT)
     embed = {"author": {"name": f"{icon} {store}"}, "color": colour,
              "title": fit(discord_escape, title, DISCORD_TITLE_LIMIT) or titles[-1]}
