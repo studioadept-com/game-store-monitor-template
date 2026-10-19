@@ -48,16 +48,23 @@
            padding: 10px 16px; border-radius: 8px; max-width: min(90vw, 640px); display: none; white-space: pre-line; }
   .disabled-card { opacity: .65; }
   details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 500; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  tr.current td { background: var(--chip); }
+  .table-wrap { overflow-x: auto; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Store monitor · Discord channels</h1>
+  <h1>Store monitor settings</h1>
   <div class="meta" id="meta">Loading…</div>
   <span id="dirty" class="warn" hidden>Unsaved changes</span>
   <button class="primary" id="save" disabled>Save config.json</button>
 </header>
 <main>
+  <div class="card" id="schedule"><h2>Check schedule</h2><p class="muted">Loading the Cloud Scheduler job…</p></div>
   <div class="card">
     <div class="row">
       <label class="check"><input type="checkbox" id="discordEnabled"> <b>Send to Discord</b></label>
@@ -305,6 +312,66 @@ async function load() {
   render();
 }
 
+const money = value => value < 0.005 ? "$0" : "$" + value.toFixed(2);
+let schedule, pick;
+
+function scheduleNote(option) {
+  if (option.minutes < 5) return el("span", {class: "warn"}, "More Google release-status calls; Google may throttle them, delaying review and publication news");
+  if (option.minutes >= 15) return el("span", {class: "muted"}, `Notifications can arrive up to ${option.minutes} minutes after a change`);
+  return null;
+}
+
+function renderSchedule() {
+  const card = $("#schedule");
+  if (!schedule.found) {
+    card.replaceChildren(el("h2", {}, "Check schedule"), el("p", {class: "bad"}, `Could not read Cloud Scheduler job ${schedule.job}: ${schedule.error}`));
+    return;
+  }
+  pick = pick ?? schedule.minutes;
+  const paused = schedule.state === "PAUSED";
+  const rows = schedule.options.map(option => el("tr", {class: option.minutes === schedule.minutes ? "current" : ""},
+    el("td", {}, el("label", {class: "check"}, el("input", {type: "radio", name: "interval", checked: option.minutes === pick,
+      onchange: () => { pick = option.minutes; renderSchedule(); }}),
+      el("span", {}, option.minutes === 60 ? "Every hour" : `Every ${option.minutes} minutes`, option.minutes === schedule.minutes ? el("span", {class: "badge"}, "current") : null))),
+    el("td", {class: "num"}, option.checks.toLocaleString()),
+    el("td", {class: "num"}, Math.round(option.free_share * 100) + "%"),
+    el("td", {class: "num"}, el("b", {}, money(option.cost))),
+    el("td", {class: "num"}, money(option.cost_without_allowance)),
+    el("td", {}, scheduleNote(option))));
+  const apply = el("button", {class: "primary", disabled: pick === schedule.minutes, onclick: async () => {
+    if (!confirm(`Change ${schedule.job} to ${pick === 60 ? "every hour" : "every " + pick + " minutes"}? This takes effect right away, without a deploy.`)) return;
+    apply.disabled = true;
+    try { schedule = await api("/api/schedule", {minutes: pick}); pick = schedule.minutes; renderSchedule(); toast("Schedule updated"); }
+    catch (error) { toast(error.message); apply.disabled = false; }
+  }}, "Apply schedule");
+  const toggle = el("button", {onclick: async () => {
+    if (!confirm(paused ? "Resume scheduled checks?" : "Pause scheduled checks? No notifications are sent while paused.")) return;
+    toggle.disabled = true;
+    try { schedule = await api("/api/schedule", {action: paused ? "resume" : "pause"}); renderSchedule(); toast(paused ? "Checks resumed" : "Checks paused"); }
+    catch (error) { toast(error.message); toggle.disabled = false; }
+  }}, paused ? "Resume checks" : "Pause checks");
+  card.replaceChildren(
+    el("div", {class: "row"}, el("h2", {class: "grow"}, "Check schedule"), toggle, apply),
+    el("p", {class: paused ? "warn" : "muted"},
+      `Now: ${schedule.schedule} (${schedule.timeZone || "UTC"}), ${paused ? "PAUSED" : "running"}. ` +
+      (schedule.samples ? `A check takes about ${schedule.check_seconds} s (mean of ${schedule.samples} in the last day).`
+                        : `No recent checks in the logs, so the estimate assumes ${schedule.check_seconds} s a check.`)),
+    el("div", {class: "table-wrap"}, el("table", {},
+      el("thead", {}, el("tr", {}, el("th", {}, "How often"), el("th", {class: "num"}, "Checks a month"),
+        el("th", {class: "num"}, "Of free CPU allowance"), el("th", {class: "num"}, "Cost a month"),
+        el("th", {class: "num"}, "If the allowance is used elsewhere"), el("th", {}, ""))),
+      el("tbody", {}, rows))),
+    el("p", {class: "muted", style: "font-size:12px;margin-bottom:0"},
+      `Cloud Run, quarter vCPU and 256 MiB, billed only while a check runs: $${schedule.prices.vcpu_second} per vCPU-second and $${schedule.prices.gib_second} per GiB-second ` +
+      `after a free ${schedule.prices.free_vcpu_seconds.toLocaleString()} vCPU-seconds and ${schedule.prices.free_gib_seconds.toLocaleString()} GiB-seconds a month (tier-1 regions). ` +
+      "The free allowance is shared by every project on the billing account. Scheduler, secrets and storage add a few cents. Applying changes the Scheduler job directly; nothing to commit."));
+}
+
+async function loadSchedule() {
+  try { schedule = await api("/api/schedule"); renderSchedule(); }
+  catch (error) { $("#schedule").replaceChildren(el("h2", {}, "Check schedule"), el("p", {class: "muted"}, error.message)); }
+}
+
 $("#discordEnabled").addEventListener("change", event => { config.discord.enabled = event.target.checked; markDirty(); render(); });
 $("#addChannel").addEventListener("click", addChannel);
 $("#save").addEventListener("click", async () => {
@@ -319,6 +386,7 @@ $("#save").addEventListener("click", async () => {
 });
 window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
 load().catch(error => { $("#meta").textContent = "Could not load: " + error.message; });
+loadSchedule();
 </script>
 </body>
 </html>

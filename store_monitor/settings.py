@@ -7,14 +7,20 @@ comes from the monitor's state (downloaded from STATE_BUCKET with gcloud, or a
 local --state file). Webhook URLs typed into the page go straight to Secret
 Manager and GitHub secrets through gcloud and gh, never into config.json or a
 file. Settings are read from ./setup.env (KEY=value lines) or the environment:
-GCP_PROJECT, GITHUB_REPO, STATE_BUCKET and MONITOR_SERVICE_ACCOUNT.
+GCP_PROJECT, GCP_REGION, GITHUB_REPO, STATE_BUCKET, MONITOR_SERVICE_ACCOUNT and
+SCHEDULER_JOB.
+
+The page also shows how often Cloud Scheduler starts a check, with a monthly
+cost estimate from the measured check time, and changes it in place.
 
 Saving only writes config.json; commit and push it to main to deploy.
 """
 import argparse
 import json
 import os
+import re
 import secrets
+import statistics
 import subprocess
 import sys
 import webbrowser
@@ -61,6 +67,38 @@ EVENTS = {
 }
 
 
+# Cloud Run request-billed prices in tier-1 regions, and the monthly free allowance per billing account.
+PRICES = {"vcpu_second": 0.000024, "gib_second": 0.0000025, "free_vcpu_seconds": 180_000, "free_gib_seconds": 360_000}
+SERVICE_SIZE = {"vcpu": 0.25, "gib": 0.25}  # deploy.yml: --cpu 0.25 --memory 256Mi
+INTERVALS = [2, 3, 5, 10, 15, 20, 30, 60]  # Minutes. Below 2 a check could still be running when the next starts.
+DEFAULT_CHECK_SECONDS = 80
+MINUTES_A_MONTH = 30 * 24 * 60
+
+
+def cron(minutes):
+    return "0 * * * *" if minutes == 60 else f"*/{minutes} * * * *"
+
+
+def interval(schedule):
+    """Minutes between checks for the schedules this page writes, else None."""
+    if schedule == "0 * * * *":
+        return 60
+    match = re.fullmatch(r"\*/(\d+) \* \* \* \*", schedule or "")
+    return int(match.group(1)) if match else None
+
+
+def estimate(minutes, check_seconds):
+    """Checks a month and the cost in dollars, with and without the free allowance left."""
+    checks = MINUTES_A_MONTH // minutes
+    vcpu, gib = checks * check_seconds * SERVICE_SIZE["vcpu"], checks * check_seconds * SERVICE_SIZE["gib"]
+    shared = vcpu * PRICES["vcpu_second"] + gib * PRICES["gib_second"]
+    free = (max(0, vcpu - PRICES["free_vcpu_seconds"]) * PRICES["vcpu_second"]
+            + max(0, gib - PRICES["free_gib_seconds"]) * PRICES["gib_second"])
+    return {"minutes": minutes, "cron": cron(minutes), "checks": checks, "vcpu_seconds": round(vcpu),
+            "cost": round(free, 2), "cost_without_allowance": round(shared, 2),
+            "free_share": round(min(1, vcpu / PRICES["free_vcpu_seconds"]), 2)}
+
+
 def load_env(path="setup.env"):
     values = {}
     if Path(path).is_file():
@@ -69,7 +107,8 @@ def load_env(path="setup.env"):
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.strip().strip("'\"")
     return {**values, **{key: os.environ[key] for key in
-                         ("GCP_PROJECT", "GITHUB_REPO", "STATE_BUCKET", "MONITOR_SERVICE_ACCOUNT") if key in os.environ}}
+                         ("GCP_PROJECT", "GCP_REGION", "GITHUB_REPO", "STATE_BUCKET", "MONITOR_SERVICE_ACCOUNT",
+                          "SCHEDULER_JOB", "SERVICE") if key in os.environ}}
 
 
 def run(command, stdin=None):
@@ -158,6 +197,9 @@ class Settings:
         self.project, self.repo = env.get("GCP_PROJECT"), env.get("GITHUB_REPO")
         self.account = env.get("MONITOR_SERVICE_ACCOUNT") or (
             f"store-monitor@{self.project}.iam.gserviceaccount.com" if self.project else None)
+        self.region = env.get("GCP_REGION")
+        self.job = env.get("SCHEDULER_JOB", "store-monitor-every-5-min")
+        self.service = env.get("SERVICE", "store-monitor")
 
     def config(self):
         return json.loads(self.config_path.read_text())
@@ -178,6 +220,47 @@ class Settings:
                 "tracks": google_tracks(self.state, config), "secrets": self.stored([n for n in names if n]),
                 "project": self.project, "repo": self.repo, "state": self.state_source,
                 "configPath": str(self.config_path.resolve())}
+
+    def check_seconds(self):
+        """Mean length of the last day's checks, from Cloud Run's request logs."""
+        ok, output = run(["gcloud", "logging", "read",
+                          f'resource.type="cloud_run_revision" AND resource.labels.service_name="{self.service}" '
+                          'AND httpRequest.requestUrl:"/run"', "--project", self.project, "--freshness=1d",
+                          "--limit=100", "--format=value(httpRequest.latency)"])
+        samples = [float(line.rstrip("s")) for line in output.split() if ok and re.fullmatch(r"[\d.]+s", line)]
+        return (round(statistics.mean(samples)), len(samples)) if samples else (DEFAULT_CHECK_SECONDS, 0)
+
+    def where(self):
+        if not (self.project and self.region):
+            raise ValueError("Set GCP_PROJECT and GCP_REGION in setup.env to see and change the schedule")
+        return ["--project", self.project, "--location", self.region]
+
+    def schedule(self):
+        location = self.where()
+        with ThreadPoolExecutor(2) as pool:
+            job = pool.submit(run, ["gcloud", "scheduler", "jobs", "describe", self.job, *location, "--format=json"])
+            seconds, samples = pool.submit(self.check_seconds).result()
+            ok, output = job.result()
+        current = json.loads(output) if ok else {}
+        minutes = interval(current.get("schedule"))
+        options = sorted(set(INTERVALS) | ({minutes} if minutes else set()))
+        return {"job": self.job, "found": ok, "error": "" if ok else output, "schedule": current.get("schedule"),
+                "state": current.get("state"), "timeZone": current.get("timeZone"), "minutes": minutes,
+                "check_seconds": seconds, "samples": samples, "prices": PRICES,
+                "options": [estimate(option, seconds) for option in options]}
+
+    def set_schedule(self, minutes=None, action=None):
+        location = self.where()
+        if action in ("pause", "resume"):
+            ok, output = run(["gcloud", "scheduler", "jobs", action, self.job, *location])
+        else:
+            if minutes not in INTERVALS:
+                raise ValueError("Pick one of the listed intervals")
+            ok, output = run(["gcloud", "scheduler", "jobs", "update", "http", self.job, *location,
+                              "--schedule", cron(minutes), "--time-zone", "Etc/UTC"])
+        if not ok:
+            raise ValueError(output or "gcloud failed")
+        return self.schedule()
 
     def save(self, config):
         discord_channels(config, include_disabled=True)  # Raises on a bad id or secret name.
@@ -237,6 +320,11 @@ def handler(settings, token, port):
                 return self.send(200, body, "text/html; charset=utf-8")
             if self.path == "/api/data":
                 return self.reply(200, settings.data())
+            if self.path == "/api/schedule":
+                try:
+                    return self.reply(200, settings.schedule())
+                except ValueError as error:
+                    return self.reply(400, {"error": str(error)})
             self.reply(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -250,6 +338,8 @@ def handler(settings, token, port):
                     return self.reply(200, settings.save(body["config"]))
                 if self.path == "/api/webhook":
                     return self.reply(200, settings.store_webhook(body.get("secret", ""), body.get("url", "")))
+                if self.path == "/api/schedule":
+                    return self.reply(200, settings.set_schedule(body.get("minutes"), body.get("action")))
                 if self.path == "/api/test":
                     return self.reply(200, settings.test(body.get("secret"), body.get("url", "").strip(), body.get("name")))
                 self.reply(404, {"error": "Not found"})

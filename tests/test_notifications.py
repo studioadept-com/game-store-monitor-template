@@ -122,8 +122,16 @@ class ChannelsTest(unittest.TestCase):
         self.assertTrue(next(game for game in found if game["key"] == "com.example.legacy")["unseen"])
         self.assertIn("qa", settings.google_tracks(state, SHIPPED))
         self.assertEqual(json.loads(settings.dumps(SHIPPED)), SHIPPED)
+        # Five-minute checks of 80 s fit the free allowance; two-minute ones don't.
+        self.assertEqual((settings.estimate(5, 80)["checks"], settings.estimate(5, 80)["cost"]), (8640, 0))
+        self.assertEqual(settings.estimate(5, 80)["cost_without_allowance"], 4.58)
+        self.assertEqual(settings.estimate(2, 80)["cost"], 6.23)
+        self.assertEqual([settings.interval(settings.cron(m)) for m in (5, 60)], [5, 60])
+        self.assertIsNone(settings.interval("0 9 * * 1"))
         with tempfile.TemporaryDirectory() as directory:
-            page = settings.Settings(Path(directory) / "config.json", state, None, {})
+            page = settings.Settings(Path(directory) / "config.json", state, None, {"GCP_PROJECT": "p", "GCP_REGION": "r"})
+            with self.assertRaises(ValueError):
+                page.set_schedule(minutes=1)  # Only the listed intervals.
             with self.assertRaises(RuntimeError):
                 page.save({"discord": {"enabled": True, "channels": [{**self.STUDIO, "webhook_secret": "ASC_PRIVATE_KEY"}]}})
             with self.assertRaises(ValueError):

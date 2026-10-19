@@ -43,7 +43,7 @@ Instead of editing `config.json` by hand, run a local page that lists your games
 python3 -m store_monitor.settings
 ```
 
-It opens on `127.0.0.1` (port 8740, or the next free one) and reads `GCP_PROJECT`, `GITHUB_REPO` and `STATE_BUCKET` from `setup.env`; it needs a signed-in `gcloud` and `gh`. Add, pause or remove Discord channels; tick each one's games, events and Google tracks; paste a channel's webhook URL to store it in Secret Manager and GitHub; and send a test message. **Save** writes only `config.json`: commit and push it to deploy. The deploy maps every `webhook_secret` named in `config.json` that exists, and manual workflow runs load every `DISCORD_WEBHOOK_URL*` repository secret. Before the first check there is no state yet, so the page lists only games already named in `config.json`.
+It opens on `127.0.0.1` (port 8740, or the next free one) and reads `GCP_PROJECT`, `GITHUB_REPO` and `STATE_BUCKET` from `setup.env`; it needs a signed-in `gcloud` and `gh`. Add, pause or remove Discord channels; tick each one's games, events and Google tracks; paste a channel's webhook URL to store it in Secret Manager and GitHub; and send a test message. The page also shows the check schedule with a monthly cost estimate per interval (from the measured check time), and can change, pause or resume the Scheduler job directly; that needs `GCP_REGION` and no deploy. **Save** writes only `config.json`: commit and push it to deploy. The deploy maps every `webhook_secret` named in `config.json` that exists, and manual workflow runs load every `DISCORD_WEBHOOK_URL*` repository secret. Before the first check there is no state yet, so the page lists only games already named in `config.json`.
 
 ### Event kinds
 
