@@ -73,7 +73,7 @@ Set up at least one.
 scripts/setup-gcp.sh secret DISCORD_WEBHOOK_URL
 ```
 
-For each further channel, store its webhook as `DISCORD_WEBHOOK_URL_<NAME>` (for example `scripts/setup-gcp.sh secret DISCORD_WEBHOOK_URL_STUDIO_B`) and add a `discord.channels` entry with that `webhook_secret`. The owner can also do all of this in the settings page (`python3 -m store_monitor.settings`; see the README).
+For each further channel, store its webhook as `DISCORD_WEBHOOK_URL_<NAME>` (for example `scripts/setup-gcp.sh secret DISCORD_WEBHOOK_URL_STUDIO_B`) and add a `discord.channels` entry with that `webhook_secret`. The owner can also do all of this in the settings page (`scripts/settings.sh`; see the README).
 
 **Telegram.** Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy its token. Add the bot to the chat or group and send the chat a message. Then store the token and look up the chat ID without printing the token:
 
@@ -124,4 +124,4 @@ The monitor runs as a Cloud Run **service** with a quarter vCPU and 256 MiB. It 
 | every 5 minutes (default) | 8,640 | $0 to about $0.35 a month |
 | every 2 minutes | 21,600 | about $7 a month |
 
-`scripts/setup-gcp.sh schedule` prints the estimate for your `SCHEDULE` (for example `SCHEDULE='*/10 * * * *'`). The settings page (`python3 -m store_monitor.settings`) shows the estimate for every interval from the measured check time and changes the schedule in place; rerunning `scripts/setup-gcp.sh schedule` later sets it back to `SCHEDULE`. If other projects on the same billing account already use the free allowance, five-minute checks cost about $5 a month. Secret Manager, Storage, Scheduler and the image registry (5 newest images kept) add a few cents. GitHub Actions minutes are used only for deploys and manual runs.
+`scripts/setup-gcp.sh schedule` prints the estimate for your `SCHEDULE` (for example `SCHEDULE='*/10 * * * *'`). The settings page (`scripts/settings.sh`) shows the estimate for every interval from the measured check time and changes the schedule in place; rerunning `scripts/setup-gcp.sh schedule` later sets it back to `SCHEDULE`. If other projects on the same billing account already use the free allowance, five-minute checks cost about $5 a month. Secret Manager, Storage, Scheduler and the image registry (5 newest images kept) add a few cents. GitHub Actions minutes are used only for deploys and manual runs.
